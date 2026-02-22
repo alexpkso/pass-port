@@ -1,65 +1,81 @@
-import Image from "next/image";
+import Link from 'next/link'
+import Nav from './components/Nav'
+import Breadcrumbs from './components/Breadcrumbs'
+import DashboardWeeklyClients from './components/DashboardWeeklyClients'
+
+const navCards = [
+  { href: '/clients', title: 'Клиенты', desc: 'Учёт клиентов и подписок', icon: '👥' },
+  { href: '/employees', title: 'Сотрудники', desc: 'Список сотрудников и должности', icon: '👤' },
+  { href: '/services', title: 'Услуги', desc: 'Список услуг и базовые стоимости', icon: '📋' },
+  { href: '/about', title: 'О сервисе', desc: 'Описание сервиса', icon: 'ℹ️' },
+]
 
 export default function Home() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
+    <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
+      <Nav />
+      <main className="mx-auto max-w-[84rem] px-4 py-6 sm:px-6 sm:py-10">
+        <Breadcrumbs items={[{ href: '/', label: 'Главная' }]} />
+
+        {/* Hero: заголовок + картинка в одном блоке */}
+        <section className="mt-4 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-sm sm:mt-6">
+          <div className="flex flex-col gap-6 p-6 sm:flex-row sm:items-center sm:justify-between sm:gap-8 sm:p-8 lg:p-10">
+            <div className="min-w-0 flex-1">
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl lg:text-4xl">
+                Pass-Port — управление подписками
+              </h1>
+              <p className="mt-3 text-base text-[var(--muted-foreground)] sm:text-lg">
+                Управляйте клиентами и подписками в одном месте.
+              </p>
+            </div>
+            <div className="flex shrink-0 justify-center sm:justify-end">
+              <img
+                src="/pixel-passport.png"
+                alt="Бизнесы и цифровое присутствие — Pass-Port"
+                className="h-36 w-auto rounded-xl object-contain sm:h-44 lg:h-52"
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Карточки разделов в один ряд */}
+        <section className="mt-8 sm:mt-10">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+            {navCards.map((card) => (
+              <Link
+                key={card.href}
+                href={card.href}
+                className="group flex flex-col rounded-xl border border-[var(--border)] bg-[var(--card)] p-5 shadow-sm transition-all hover:border-blue-500/50 hover:shadow-md sm:p-6"
+              >
+                <span className="text-2xl sm:text-3xl" aria-hidden>{card.icon}</span>
+                <span className="mt-2 text-lg font-medium text-[var(--foreground)] group-hover:text-[var(--accent)]">
+                  {card.title}
+                </span>
+                <span className="mt-1 text-sm text-[var(--muted)]">{card.desc}</span>
+              </Link>
+            ))}
+          </div>
+        </section>
+
+        {/* Дашборд в отдельной карточке */}
+        <section className="mt-8 sm:mt-10">
+          <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-sm sm:p-6">
+            <DashboardWeeklyClients />
+          </div>
+        </section>
+
+        {/* Ссылка на сайт */}
+        <footer className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-[var(--border)] pt-6 sm:mt-10">
           <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+            href="https://pass-port.ru/"
             target="_blank"
             rel="noopener noreferrer"
+            className="text-sm text-[var(--muted)] underline decoration-[var(--border)] underline-offset-2 hover:text-[var(--foreground)] hover:decoration-[var(--accent)]"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
+            Перейти на pass-port.ru
           </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
+        </footer>
       </main>
     </div>
-  );
+  )
 }

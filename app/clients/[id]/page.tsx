@@ -13,9 +13,7 @@ type Client = {
   name: string
   legal_name: string | null
   manager_id: number | null
-  employees: Employee | null
-  subscription_start: string | null
-  subscription_end: string | null
+  employees: Employee [] | null
   created_at: string
 }
 type Charge = {
@@ -68,7 +66,7 @@ export default function ClientCardPage() {
     if (!id) return
     const { data, error: e } = await supabase
       .from('clients')
-      .select('id, name, legal_name, manager_id, subscription_start, subscription_end, created_at, employees(id, name)')
+      .select('id, name, legal_name, manager_id, created_at, employees(id, name)')
       .eq('id', id)
       .single()
     if (e) {
@@ -197,8 +195,6 @@ export default function ClientCardPage() {
           <dl className="mt-4 grid gap-2 sm:grid-cols-2">
             <div><dt className="text-sm text-[var(--muted)]">Юридическое название</dt><dd className="font-medium">{client.legal_name ?? '—'}</dd></div>
             <div><dt className="text-sm text-[var(--muted)]">Менеджер</dt><dd className="font-medium">{client.employees?.name ?? '—'}</dd></div>
-            <div><dt className="text-sm text-[var(--muted)]">Начало подписки</dt><dd className="font-medium">{formatDate(client.subscription_start)}</dd></div>
-            <div><dt className="text-sm text-[var(--muted)]">Конец подписки</dt><dd className="font-medium">{formatDate(client.subscription_end)}</dd></div>
             <div><dt className="text-sm text-[var(--muted)]">Создан</dt><dd className="font-medium">{formatDate(client.created_at)}</dd></div>
           </dl>
         </section>
@@ -381,6 +377,22 @@ export default function ClientCardPage() {
 const CHART_HEIGHT_PX = 180
 const MIN_BAR_HEIGHT_PX = 24
 
+/** Понедельник недели для даты (ISO неделя) */
+function getWeekMonday(d: Date): Date {
+  const x = new Date(d)
+  x.setHours(0, 0, 0, 0)
+  const day = x.getDay()
+  const monOffset = day === 0 ? -6 : 1 - day
+  x.setDate(x.getDate() + monOffset)
+  return x
+}
+
+/** Ключ недели: YYYY-MM-DD понедельника */
+function weekKey(d: Date): string {
+  const m = getWeekMonday(d)
+  return m.toISOString().slice(0, 10)
+}
+
 function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments: Payment[] }) {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -388,16 +400,30 @@ function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments
   const totalCharged = charges.reduce((s, c) => s + Number(c.amount), 0)
   const paidShare = totalCharged ? totalPaid / totalCharged : 0
 
-  const byMonth = new Map<string, { total: number; byService: Record<string, number> }>()
+  // Равномерно распределить сумму каждого начисления по неделям периода (start_date .. end_date)
+  const byWeek = new Map<string, { total: number; byService: Record<string, number> }>()
   charges.forEach(c => {
-    const dateStr = c.start_date || c.created_at
-    if (!dateStr) return
-    const start = new Date(dateStr)
-    const key = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`
-    if (!byMonth.has(key)) byMonth.set(key, { total: 0, byService: {} })
-    const rec = byMonth.get(key)!
-    rec.total += Number(c.amount)
-    rec.byService[c.service_name] = (rec.byService[c.service_name] ?? 0) + Number(c.amount)
+    const startStr = c.start_date || c.created_at
+    const endStr = c.end_date || c.start_date || c.created_at
+    if (!startStr) return
+    const start = new Date(startStr)
+    const end = endStr ? new Date(endStr) : new Date(start)
+    start.setHours(0, 0, 0, 0)
+    end.setHours(0, 0, 0, 0)
+    const mondayStart = getWeekMonday(start)
+    const mondayEnd = getWeekMonday(end)
+    const numDays = Math.round((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000)) + 1
+    const numWeeks = Math.max(1, Math.ceil(numDays / 7))
+    const amountPerWeek = Number(c.amount) / numWeeks
+    const cursor = new Date(mondayStart)
+    while (cursor.getTime() <= mondayEnd.getTime()) {
+      const key = cursor.toISOString().slice(0, 10)
+      if (!byWeek.has(key)) byWeek.set(key, { total: 0, byService: {} })
+      const rec = byWeek.get(key)!
+      rec.total += amountPerWeek
+      rec.byService[c.service_name] = (rec.byService[c.service_name] ?? 0) + amountPerWeek
+      cursor.setDate(cursor.getDate() + 7)
+    }
   })
 
   const allServices = Array.from(new Set(charges.map(c => c.service_name)))
@@ -405,41 +431,44 @@ function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments
   const colors: Record<string, string> = {}
   allServices.forEach((s, i) => { colors[s] = colorList[i % colorList.length] })
 
-  const nowY = today.getFullYear()
-  const nowM = today.getMonth()
-  const currentKey = `${nowY}-${String(nowM + 1).padStart(2, '0')}`
-  const centerMonths: string[] = []
-  for (let i = -6; i <= 6; i++) {
-    const d = new Date(nowY, nowM + i, 1)
-    centerMonths.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
+  const currentWeekMonday = getWeekMonday(today)
+  const currentWeekKey = currentWeekMonday.toISOString().slice(0, 10)
+  const weeksEachSide = 12
+  const weekKeys: string[] = []
+  for (let i = -weeksEachSide; i <= weeksEachSide; i++) {
+    const w = new Date(currentWeekMonday)
+    w.setDate(w.getDate() + i * 7)
+    weekKeys.push(w.toISOString().slice(0, 10))
   }
-  const dataMonths = Array.from(byMonth.keys()).sort()
-  const monthKeys = Array.from(new Set([...dataMonths, ...centerMonths])).sort()
 
-  const maxSum = Math.max(1, ...Array.from(byMonth.values()).map(r => r.total))
+  const maxSum = Math.max(1, ...weekKeys.map(k => byWeek.get(k)?.total ?? 0))
+
+  /** Подпись для недели: дд.мм или нед. XX */
+  const weekLabel = (key: string) => {
+    const [y, m, d] = key.split('-').map(Number)
+    return `${String(d).padStart(2, '0')}.${String(m).padStart(2, '0')}`
+  }
 
   return (
     <div className="space-y-4">
-      <p className="text-sm text-[var(--muted)]">Ось X — время (месяц), ось Y — сумма (₽). Сплошные столбики — прошлое, пунктир — будущее. Зелёная часть — доля оплаты.</p>
+      <p className="text-sm text-[var(--muted)]">Ось X — недели (понедельник), ось Y — сумма (₽). Начисления распределены по неделям периода услуги. Сплошные столбики — прошлое, пунктир — будущее. Зелёная часть — доля оплаты.</p>
       <div className="overflow-x-auto">
-        <div className="inline-flex items-end gap-1 pb-8 pt-2" style={{ minHeight: CHART_HEIGHT_PX + 48 }}>
-          {/* Ось Y: подпись макс. суммы */}
+        <div className="inline-flex items-end gap-0.5 pb-8 pt-2" style={{ minHeight: CHART_HEIGHT_PX + 48 }}>
           <div className="flex flex-col justify-between pr-2 text-right text-xs text-[var(--muted)]" style={{ height: CHART_HEIGHT_PX }}>
             <span>{formatMoney(maxSum)}</span>
             <span>0</span>
           </div>
-          <div className="flex items-end gap-1.5">
-            {monthKeys.map((key) => {
-              const data = byMonth.get(key) ?? { total: 0, byService: {} }
-              const [y, m] = key.split('-').map(Number)
-              const monthDate = new Date(y, m - 1, 1)
-              const isFuture = monthDate > today
-              const isCurrent = key === currentKey
+          <div className="flex items-end gap-0.5">
+            {weekKeys.map((key) => {
+              const data = byWeek.get(key) ?? { total: 0, byService: {} }
+              const weekMonday = new Date(key)
+              const isFuture = weekMonday > today
+              const isCurrent = key === currentWeekKey
               const ratio = maxSum ? data.total / maxSum : 0
               const barHeightPx = data.total > 0 ? Math.max(MIN_BAR_HEIGHT_PX, Math.round(ratio * CHART_HEIGHT_PX)) : 0
               const paidHeightPx = barHeightPx * Math.min(1, paidShare)
               return (
-                <div key={key} className="flex w-10 flex-shrink-0 flex-col items-center gap-1">
+                <div key={key} className="flex w-7 flex-shrink-0 flex-col items-center gap-0.5">
                   <div className="w-full" style={{ height: CHART_HEIGHT_PX }}>
                     {barHeightPx > 0 && (
                       <div
@@ -450,7 +479,7 @@ function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments
                           display: 'flex',
                           flexDirection: 'column-reverse',
                         }}
-                        title={`${key}: ${formatMoney(data.total)}${allServices.length ? ` (${Object.entries(data.byService).map(([s, v]) => `${s}: ${formatMoney(v)}`).join(', ')})` : ''}`}
+                        title={`Неделя ${key}: ${formatMoney(data.total)}${allServices.length ? ` (${Object.entries(data.byService).map(([s, v]) => `${s}: ${formatMoney(v)}`).join(', ')})` : ''}`}
                       >
                         {paidHeightPx > 0 && (
                           <div className="w-full bg-green-500/90 flex-shrink-0" style={{ height: paidHeightPx }} />
@@ -474,8 +503,8 @@ function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments
                       </div>
                     )}
                   </div>
-                  <span className={`text-xs ${isCurrent ? 'font-semibold text-blue-600' : 'text-[var(--muted)]'}`} title={isCurrent ? 'Текущая дата' : ''}>
-                    {m}.{String(y).slice(2)}{isCurrent ? ' ✓' : ''}
+                  <span className={`text-[10px] truncate max-w-full ${isCurrent ? 'font-semibold text-blue-600' : 'text-[var(--muted)]'}`} title={isCurrent ? 'Текущая неделя' : key}>
+                    {weekLabel(key)}{isCurrent ? ' ✓' : ''}
                   </span>
                 </div>
               )

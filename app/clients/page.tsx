@@ -16,9 +16,7 @@ type Client = {
   name: string
   legal_name: string | null
   manager_id: number | null
-  employees: Employee | null
-  subscription_start: string | null
-  subscription_end: string | null
+  employees: Employee [] | null
   created_at: string
 }
 
@@ -34,8 +32,6 @@ export default function ClientsPage() {
     name: '',
     legal_name: '',
     manager_id: '',
-    subscription_start: '',
-    subscription_end: '',
   })
   const [employees, setEmployees] = useState<Employee[]>([])
   const [updatingId, setUpdatingId] = useState<number | null>(null)
@@ -43,7 +39,7 @@ export default function ClientsPage() {
 
   const supabase = createClient()
 
-  const updateClient = async (id: number, patch: Partial<Pick<Client, 'legal_name' | 'manager_id' | 'subscription_start' | 'subscription_end'>>) => {
+  const updateClient = async (id: number, patch: Partial<Pick<Client, 'legal_name' | 'manager_id'>>) => {
     setUpdatingId(id)
     setError(null)
     const { error: updateError } = await supabase.from('clients').update(patch).eq('id', id)
@@ -57,7 +53,7 @@ export default function ClientsPage() {
     setError(null)
     const { data, error: fetchError } = await supabase
       .from('clients')
-      .select('id, name, legal_name, manager_id, subscription_start, subscription_end, created_at, employees(id, name)')
+      .select('id, name, legal_name, manager_id, created_at, employees(id, name)')
       .order('created_at', { ascending: false })
     if (fetchError) {
       setError(fetchError.message)
@@ -87,15 +83,13 @@ export default function ClientsPage() {
       name: form.name.trim(),
       legal_name: form.legal_name.trim() || null,
       manager_id: form.manager_id ? Number(form.manager_id) : null,
-      subscription_start: form.subscription_start || null,
-      subscription_end: form.subscription_end || null,
     })
     if (insertError) {
       setError(insertError.message)
       setSaving(false)
       return
     }
-    setForm({ name: '', legal_name: '', manager_id: '', subscription_start: '', subscription_end: '' })
+    setForm({ name: '', legal_name: '', manager_id: '' })
     await fetchClients()
     setSaving(false)
   }
@@ -160,32 +154,6 @@ export default function ClientsPage() {
                 ))}
               </select>
             </div>
-            <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label htmlFor="subscription_start" className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">
-                  Начало подписки
-                </label>
-                <input
-                  id="subscription_start"
-                  type="date"
-                  value={form.subscription_start}
-                  onChange={(e) => setForm((f) => ({ ...f, subscription_start: e.target.value }))}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
-                />
-              </div>
-              <div>
-                <label htmlFor="subscription_end" className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">
-                  Конец подписки
-                </label>
-                <input
-                  id="subscription_end"
-                  type="date"
-                  value={form.subscription_end}
-                  onChange={(e) => setForm((f) => ({ ...f, subscription_end: e.target.value }))}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
-                />
-              </div>
-            </div>
             <div className="sm:col-span-2">
               <button
                 type="submit"
@@ -231,12 +199,6 @@ export default function ClientsPage() {
                       Менеджер
                     </th>
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
-                      Начало подписки
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
-                      Конец подписки
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
                       Создан
                     </th>
                   </tr>
@@ -280,24 +242,6 @@ export default function ClientsPage() {
                             <option key={e.id} value={e.id}>{e.name}</option>
                           ))}
                         </select>
-                      </td>
-                      <td className="px-4 py-2">
-                        <input
-                          type="date"
-                          value={client.subscription_start ?? ''}
-                          onChange={(e) => updateClient(client.id, { subscription_start: e.target.value || null })}
-                          disabled={updatingId === client.id}
-                          className="rounded border border-zinc-200 bg-white px-2 py-1 text-sm text-zinc-900 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
-                        />
-                      </td>
-                      <td className="px-4 py-2">
-                        <input
-                          type="date"
-                          value={client.subscription_end ?? ''}
-                          onChange={(e) => updateClient(client.id, { subscription_end: e.target.value || null })}
-                          disabled={updatingId === client.id}
-                          className="rounded border border-zinc-200 bg-white px-2 py-1 text-sm text-zinc-900 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
-                        />
                       </td>
                       <td className="px-4 py-2 text-sm text-[var(--muted)]">
                         {formatDate(client.created_at)}

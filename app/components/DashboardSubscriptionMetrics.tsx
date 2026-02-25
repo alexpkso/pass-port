@@ -220,7 +220,7 @@ export default function DashboardSubscriptionMetrics() {
   const formatMoney = (n: number) =>
     new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(n) + ' ₽'
 
-  const cardStatusClasses: Record<Status, { bg: string; border: string; value: string }> = {
+  const cardStatusClasses: Record<Exclude<Status, null> | 'neutral', { bg: string; border: string; value: string }> = {
     green: {
       bg: 'bg-emerald-50 dark:bg-emerald-950/25',
       border: 'border-emerald-200 dark:border-emerald-800',
@@ -236,7 +236,7 @@ export default function DashboardSubscriptionMetrics() {
       border: 'border-red-200 dark:border-red-800',
       value: 'text-red-700 dark:text-red-300',
     },
-    null: {
+    neutral: {
       bg: 'bg-[var(--muted)]/5',
       border: 'border-[var(--border)]',
       value: 'text-[var(--foreground)]',
@@ -311,7 +311,7 @@ export default function DashboardSubscriptionMetrics() {
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {cards.map((card) => {
-          const sc = cardStatusClasses[card.status ?? null]
+          const sc = cardStatusClasses[card.status ?? 'neutral']
           return (
             <div
               key={card.title}

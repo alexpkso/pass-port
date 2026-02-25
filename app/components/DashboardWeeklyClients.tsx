@@ -124,6 +124,17 @@ export default function DashboardWeeklyClients() {
   yearsInView.forEach((y, i) => {
     yearToShade[y] = YEAR_SHADES[i % YEAR_SHADES.length]
   })
+  // Группы подряд идущих недель по одному году — одна полоса на год
+  const yearGroups: { year: string; count: number }[] = []
+  weekKeys.forEach((key) => {
+    const y = yearPart(key)
+    if (yearGroups.length > 0 && yearGroups[yearGroups.length - 1].year === y)
+      yearGroups[yearGroups.length - 1].count += 1
+    else yearGroups.push({ year: y, count: 1 })
+  })
+  const COL_PX = 28
+  const GAP_PX = 2
+  const stripWidth = (count: number) => count * (COL_PX + GAP_PX) - GAP_PX
 
   useEffect(() => {
     if (!drag) return
@@ -244,10 +255,8 @@ export default function DashboardWeeklyClients() {
           <div className="flex gap-0.5 pb-2 mt-0.5">
             <div className="w-14 shrink-0" />
             <div className="flex gap-0.5 flex-1 min-w-0">
-              {weekKeys.map((key, idx) => {
+              {weekKeys.map((key) => {
                 const isCurrent = key === currentWeekKey
-                const year = yearPart(key)
-                const isFirstOfYear = idx === 0 || yearPart(weekKeys[idx - 1]) !== year
                 return (
                   <div key={key} className="flex w-7 flex-shrink-0 flex-col items-center text-center">
                     <span
@@ -256,16 +265,28 @@ export default function DashboardWeeklyClients() {
                     >
                       {datePart(key)}
                     </span>
-                    <span
-                      className="mt-0.5 block w-full rounded px-0.5 py-0.5 text-[9px] font-medium leading-tight text-[var(--muted-foreground)]"
-                      style={{ backgroundColor: yearToShade[year] ?? YEAR_SHADES[0] }}
-                      title={year}
-                    >
-                      {isFirstOfYear ? year : ''}
-                    </span>
                   </div>
                 )
               })}
+            </div>
+          </div>
+          {/* Одна полоса на год с подписью года */}
+          <div className="flex mt-0.5 gap-0.5">
+            <div className="w-14 shrink-0" />
+            <div className="flex gap-0.5" style={{ width: stripWidth(weekKeys.length) }}>
+              {yearGroups.map((g) => (
+                <div
+                  key={g.year}
+                  className="flex items-center rounded px-1 py-0.5 text-[9px] font-medium leading-tight text-[var(--muted-foreground)] shrink-0"
+                  style={{
+                    width: stripWidth(g.count),
+                    backgroundColor: yearToShade[g.year] ?? YEAR_SHADES[0],
+                  }}
+                  title={g.year}
+                >
+                  {g.year}
+                </div>
+              ))}
             </div>
           </div>
         </div>

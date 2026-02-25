@@ -79,8 +79,8 @@ export default function Home() {
             </div>
             <div className="group flex shrink-0 justify-center sm:justify-end [perspective:800px]">
               <img
-                src="/pixel-passport.png"
-                alt="Бизнесы и цифровое присутствие — Pass-Port"
+                src="/pixel-hero.gif"
+                alt="Локальный бизнес и цифровое присутствие — отзывы, карты, соцсети"
                 className="h-36 w-auto rounded-xl object-contain transition-transform duration-300 ease-out sm:h-44 lg:h-52 group-hover:[transform:rotateY(6deg)_rotateX(-4deg)]"
               />
             </div>

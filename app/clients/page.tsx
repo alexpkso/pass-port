@@ -20,13 +20,53 @@ type Client = {
   created_at: string
 }
 
-const formatDate = (d: string | null) =>
-  d ? new Date(d).toLocaleDateString('ru-RU') : '—'
+const formatDate = (d: string | null) => {
+  if (!d) return '—'
+  const t = new Date(d).getTime()
+  return Number.isNaN(t) ? '—' : new Date(d).toLocaleDateString('ru-RU')
+}
 
 const formatMoney = (n: number) =>
   new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(n) + ' ₽'
 
 type ClientStats = { charged: number; paid: number; start: string | null; end: string | null }
+
+const CSV_SEP = ';' // Excel в русской локали ожидает ; как разделитель
+
+function escapeCsvCell(value: string): string {
+  if (!/[\n";]/.test(value)) return value
+  return '"' + value.replace(/"/g, '""') + '"'
+}
+
+function downloadClientsCsv(
+  clients: Client[],
+  clientStats: Record<number, ClientStats>,
+  employees: Employee[]
+) {
+  const headers = ['Название', 'Начислено', 'Оплачено', 'Начало', 'Завершение', 'Менеджер']
+  const rows = clients.map((client) => {
+    const stats = clientStats[client.id] ?? { charged: 0, paid: 0, start: null, end: null }
+    const emp = client.employees
+    const managerName = Array.isArray(emp) ? emp[0]?.name : (emp as Employee | null)?.name
+    const manager = managerName ?? employees.find((e) => e.id === client.manager_id)?.name ?? ''
+    return [
+      client.name,
+      String(stats.charged),
+      String(stats.paid),
+      stats.start ?? '',
+      stats.end ?? '',
+      manager,
+    ].map(escapeCsvCell)
+  })
+  const csv = [headers.map(escapeCsvCell).join(CSV_SEP), ...rows.map((r) => r.join(CSV_SEP))].join('\n')
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `клиенты_${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 export default function ClientsPage() {
   const [clients, setClients] = useState<Client[]>([])
@@ -61,22 +101,30 @@ export default function ClientsPage() {
       supabase.from('charges').select('client_id, amount, start_date, end_date'),
       supabase.from('payments').select('client_id, amount'),
     ])
-    if (clientsRes.error) {
-      setError(clientsRes.error.message)
-      setClients([])
-      setClientStats({})
-    } else {
+    const err = clientsRes.error?.message ?? chargesRes.error?.message ?? paymentsRes.error?.message ?? null
+    if (err) {
+      setError(err)
+      if (clientsRes.error) {
+        setClients([])
+        setClientStats({})
+      }
+    }
+    if (!clientsRes.error) {
       setClients((clientsRes.data ?? []) as Client[])
+    }
+    if (!clientsRes.error && !chargesRes.error && !paymentsRes.error) {
       const stats: Record<number, ClientStats> = {}
       const charges = (chargesRes.data ?? []) as { client_id: number; amount: number; start_date: string | null; end_date: string | null }[]
       const payments = (paymentsRes.data ?? []) as { client_id: number; amount: number }[]
       charges.forEach((c) => {
+        if (c.client_id == null) return
         if (!stats[c.client_id]) stats[c.client_id] = { charged: 0, paid: 0, start: null, end: null }
         stats[c.client_id].charged += Number(c.amount)
         if (c.start_date && (!stats[c.client_id].start || c.start_date < stats[c.client_id].start!)) stats[c.client_id].start = c.start_date
         if (c.end_date && (!stats[c.client_id].end || c.end_date > stats[c.client_id].end!)) stats[c.client_id].end = c.end_date
       })
       payments.forEach((p) => {
+        if (p.client_id == null) return
         if (!stats[p.client_id]) stats[p.client_id] = { charged: 0, paid: 0, start: null, end: null }
         stats[p.client_id].paid += Number(p.amount)
       })
@@ -186,9 +234,19 @@ export default function ClientsPage() {
 
         {/* Список клиентов */}
         <section className="mt-8">
-          <h2 className="mb-4 text-lg font-medium text-[var(--foreground)]">
-            Клиенты Pass-Port
-          </h2>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-medium text-[var(--foreground)]">
+              Клиенты Pass-Port
+            </h2>
+            <button
+              type="button"
+              onClick={() => downloadClientsCsv(clients, clientStats, employees)}
+              disabled={loading || clients.length === 0}
+              className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm font-medium text-[var(--foreground)] shadow-sm transition hover:bg-[var(--muted)]/10 disabled:opacity-50"
+            >
+              Выгрузить в CSV
+            </button>
+          </div>
           {loading ? (
             <p className="text-[var(--muted)]">Загрузка…</p>
           ) : clients.length === 0 ? (

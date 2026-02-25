@@ -62,8 +62,9 @@ export default function EmployeesPage() {
   }
 
   const fetchPositions = async () => {
-    const { data } = await supabase.from('positions').select('id, name').order('name')
-    setPositions((data ?? []) as Position[])
+    const { data, error: posError } = await supabase.from('positions').select('id, name').order('name')
+    if (posError) setError((prev) => prev || posError.message)
+    else setPositions((data ?? []) as Position[])
   }
 
   useEffect(() => {

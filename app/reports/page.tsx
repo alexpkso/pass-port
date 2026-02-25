@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import { createClient } from '@/utils/supabase/client'
 import Nav from '../components/Nav'
 import Breadcrumbs from '../components/Breadcrumbs'
@@ -43,6 +44,25 @@ type Payment = {
 const formatMoney = (n: number) =>
   new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n) + ' ₽'
 
+const CSV_SEP = ';'
+
+function escapeCsvCell(value: string): string {
+  if (!/[\n";]/.test(value)) return value
+  return '"' + value.replace(/"/g, '""') + '"'
+}
+
+function downloadCsv(filename: string, headers: string[], rows: string[][]) {
+  const lines = [headers.map(escapeCsvCell).join(CSV_SEP), ...rows.map((r) => r.map(escapeCsvCell).join(CSV_SEP))]
+  const csv = lines.join('\n')
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function getWeekMonday(d: Date): Date {
   const x = new Date(d)
   x.setHours(0, 0, 0, 0)
@@ -58,6 +78,7 @@ export default function ReportsPage() {
   const [payments, setPayments] = useState<Payment[]>([])
   const [clients, setClients] = useState<Client[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [periodFrom, setPeriodFrom] = useState('')
   const [periodTo, setPeriodTo] = useState('')
 
@@ -70,6 +91,7 @@ export default function ReportsPage() {
   useEffect(() => {
     let cancelled = false
     setLoading(true)
+    setError(null)
     const supabase = createClient()
     Promise.all([
       supabase.from('journal_entries').select('id, entry_date, debit_account_code, credit_account_code, amount, client_id, service_name, document_type, document_id, document_extra, created_at').order('entry_date', { ascending: true }),
@@ -78,10 +100,12 @@ export default function ReportsPage() {
       supabase.from('clients').select('id, name').order('name'),
     ]).then(([entriesRes, chargesRes, paymentsRes, clientsRes]) => {
       if (cancelled) return
-      setJournalEntries((entriesRes.data ?? []) as JournalEntry[])
-      setCharges((chargesRes.data ?? []) as Charge[])
-      setPayments((paymentsRes.data ?? []) as Payment[])
-      setClients((clientsRes.data ?? []) as Client[])
+      const err = entriesRes.error?.message ?? chargesRes.error?.message ?? paymentsRes.error?.message ?? clientsRes.error?.message ?? null
+      if (err) setError(err)
+      if (!entriesRes.error) setJournalEntries((entriesRes.data ?? []) as JournalEntry[])
+      if (!chargesRes.error) setCharges((chargesRes.data ?? []) as Charge[])
+      if (!paymentsRes.error) setPayments((paymentsRes.data ?? []) as Payment[])
+      if (!clientsRes.error) setClients((clientsRes.data ?? []) as Client[])
       setLoading(false)
     })
     return () => { cancelled = true }
@@ -174,9 +198,28 @@ export default function ReportsPage() {
       <div className="mx-auto max-w-[84rem] px-4 py-8 sm:px-6">
         <Breadcrumbs items={[{ href: '/', label: 'Главная' }, { href: '/reports', label: 'Отчёты' }]} />
         <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Отчёты</h1>
+        {error && (
+          <p className="mt-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300">
+            Ошибка загрузки: {error}
+          </p>
+        )}
 
         <section className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-          <h2 className="text-lg font-medium text-[var(--foreground)]">Карточка счёта 62</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-medium text-[var(--foreground)]">Карточка счёта 62</h2>
+            <button
+              type="button"
+              onClick={() => {
+                const headers = ['Клиент', 'Сальдо на начало', 'Начислено', 'Оплачено', 'Сальдо на конец']
+                const rows = cardRows.map((r) => [r.client_name, String(r.opening), String(r.charged), String(r.paid), String(r.closing)])
+                downloadCsv(`карточка_62_${periodFrom}_${periodTo}.csv`, headers, rows)
+              }}
+              disabled={loading || cardRows.length === 0}
+              className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm font-medium text-[var(--foreground)] shadow-sm transition hover:bg-[var(--muted)]/10 disabled:opacity-50"
+            >
+              Выгрузить в CSV
+            </button>
+          </div>
           <div className="mt-4 flex flex-wrap items-end gap-4">
             <label className="flex items-center gap-2">
               <span className="text-sm text-[var(--muted)]">Период с</span>
@@ -203,7 +246,11 @@ export default function ReportsPage() {
                   <tbody className="divide-y divide-[var(--border)]">
                     {cardRows.map((r) => (
                       <tr key={r.client_id}>
-                        <td className="px-3 py-2">{r.client_name}</td>
+                        <td className="px-3 py-2">
+                          <Link href={`/clients/${r.client_id}`} className="text-blue-600 hover:underline dark:text-blue-400">
+                            {r.client_name}
+                          </Link>
+                        </td>
                         <td className="px-3 py-2 text-right">{formatMoney(r.opening)}</td>
                         <td className="px-3 py-2 text-right">{formatMoney(r.charged)}</td>
                         <td className="px-3 py-2 text-right">{formatMoney(r.paid)}</td>
@@ -234,7 +281,21 @@ export default function ReportsPage() {
           {loading ? <p className="mt-4 text-sm text-[var(--muted)]">Загрузка…</p> : (
             <div className="mt-4 space-y-8">
               <div>
-                <h3 className="mb-2 text-sm font-medium text-[var(--foreground)]">Кому мы должны оказание услуг</h3>
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-medium text-[var(--foreground)]">Кому мы должны оказание услуг</h3>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const headers = ['Клиент', 'Сумма по контрактам за все время', 'Сумма оплат за все время', 'Сумма к оплате', 'Сумма оказанных услуг', 'Наша задолженность']
+                      const rows = clientsWeOwe.map((r) => [r.client_name, String(Math.round(r.totalCharged)), String(Math.round(r.totalPaid)), String(Math.round(r.toPay)), String(Math.round(r.sumRendered)), String(Math.round(r.debtUs ?? 0))])
+                      downloadCsv('кому_мы_должны_услуги.csv', headers, rows)
+                    }}
+                    disabled={loading || clientsWeOwe.length === 0}
+                    className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm font-medium text-[var(--foreground)] shadow-sm transition hover:bg-[var(--muted)]/10 disabled:opacity-50"
+                  >
+                    Выгрузить в CSV
+                  </button>
+                </div>
                 <div className="overflow-auto rounded-lg border border-[var(--border)]">
                   <table className="min-w-full table-fixed text-sm">
                     <colgroup>
@@ -254,7 +315,11 @@ export default function ReportsPage() {
                     <tbody className="divide-y divide-[var(--border)]">
                       {clientsWeOwe.map((r) => (
                         <tr key={r.client_id}>
-                          <td className="w-[320px] max-w-[320px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-2 font-medium" title={r.client_name}>{r.client_name}</td>
+                          <td className="w-[320px] max-w-[320px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-2 font-medium" title={r.client_name}>
+                            <Link href={`/clients/${r.client_id}`} className="text-blue-600 hover:underline dark:text-blue-400">
+                              {r.client_name}
+                            </Link>
+                          </td>
                           <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(r.totalCharged))}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(r.totalPaid))}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(r.toPay))}</td>
@@ -278,7 +343,21 @@ export default function ReportsPage() {
                 </div>
               </div>
               <div>
-                <h3 className="mb-2 text-sm font-medium text-[var(--foreground)]">Кто нам должен за оказанные услуги</h3>
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-medium text-[var(--foreground)]">Кто нам должен за оказанные услуги</h3>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const headers = ['Клиент', 'Сумма по контрактам за все время', 'Сумма оплат за все время', 'Сумма к оплате', 'Сумма оказанных услуг', 'Задолженность клиента']
+                      const rows = clientsWhoOweUs.map((r) => [r.client_name, String(Math.round(r.totalCharged)), String(Math.round(r.totalPaid)), String(Math.round(r.toPay)), String(Math.round(r.sumRendered)), String(Math.round(r.debtClient ?? 0))])
+                      downloadCsv('кто_нам_должен_услуги.csv', headers, rows)
+                    }}
+                    disabled={loading || clientsWhoOweUs.length === 0}
+                    className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm font-medium text-[var(--foreground)] shadow-sm transition hover:bg-[var(--muted)]/10 disabled:opacity-50"
+                  >
+                    Выгрузить в CSV
+                  </button>
+                </div>
                 <div className="overflow-auto rounded-lg border border-[var(--border)]">
                   <table className="min-w-full table-fixed text-sm">
                     <colgroup>
@@ -298,7 +377,11 @@ export default function ReportsPage() {
                     <tbody className="divide-y divide-[var(--border)]">
                       {clientsWhoOweUs.map((r) => (
                         <tr key={r.client_id}>
-                          <td className="w-[320px] max-w-[320px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-2 font-medium" title={r.client_name}>{r.client_name}</td>
+                          <td className="w-[320px] max-w-[320px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-2 font-medium" title={r.client_name}>
+                            <Link href={`/clients/${r.client_id}`} className="text-blue-600 hover:underline dark:text-blue-400">
+                              {r.client_name}
+                            </Link>
+                          </td>
                           <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(r.totalCharged))}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(r.totalPaid))}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(r.toPay))}</td>

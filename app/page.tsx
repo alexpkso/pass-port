@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import Nav from './components/Nav'
 import Breadcrumbs from './components/Breadcrumbs'
+import DashboardSubscriptionMetrics from './components/DashboardSubscriptionMetrics'
 import DashboardWeeklyClients from './components/DashboardWeeklyClients'
 
 const iconClass = 'size-8 sm:size-9 text-blue-500 dark:text-blue-400 opacity-90 group-hover:opacity-100 transition-opacity'
@@ -76,13 +77,20 @@ export default function Home() {
                 Управляйте клиентами и подписками в одном месте.
               </p>
             </div>
-            <div className="flex shrink-0 justify-center sm:justify-end">
+            <div className="group flex shrink-0 justify-center sm:justify-end [perspective:800px]">
               <img
                 src="/pixel-passport.png"
                 alt="Бизнесы и цифровое присутствие — Pass-Port"
-                className="h-36 w-auto rounded-xl object-contain sm:h-44 lg:h-52"
+                className="h-36 w-auto rounded-xl object-contain transition-transform duration-300 ease-out sm:h-44 lg:h-52 group-hover:[transform:rotateY(6deg)_rotateX(-4deg)]"
               />
             </div>
+          </div>
+        </section>
+
+        {/* Метрики подписной модели */}
+        <section className="mt-8 sm:mt-10">
+          <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-sm sm:p-6">
+            <DashboardSubscriptionMetrics />
           </div>
         </section>
 
@@ -105,7 +113,7 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Дашборд в отдельной карточке */}
+        {/* Дашборд: клиенты по неделям */}
         <section className="mt-8 sm:mt-10">
           <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-sm sm:p-6">
             <DashboardWeeklyClients />

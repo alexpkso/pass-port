@@ -32,6 +32,7 @@ type ChargeRow = { client_id: number; start_date: string | null; end_date: strin
 export default function DashboardWeeklyClients() {
   const [charges, setCharges] = useState<ChargeRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [scrollPos, setScrollPos] = useState<number | null>(null)
   const [drag, setDrag] = useState<{ x: number; startIndex: number } | null>(null)
   const chartScrollRef = useRef<HTMLDivElement>(null)
@@ -41,9 +42,14 @@ export default function DashboardWeeklyClients() {
     supabase
       .from('charges')
       .select('client_id, start_date, end_date, created_at')
-      .then(({ data, error }) => {
-        if (error) setCharges([])
-        else setCharges((data ?? []) as ChargeRow[])
+      .then(({ data, error: err }) => {
+        if (err) {
+          setError(err.message)
+          setCharges([])
+        } else {
+          setError(null)
+          setCharges((data ?? []) as ChargeRow[])
+        }
         setLoading(false)
       })
   }, [])
@@ -145,8 +151,19 @@ export default function DashboardWeeklyClients() {
   if (loading) {
     return (
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-        <h2 className="text-lg font-medium text-[var(--foreground)]">Действующие клиенты по неделям</h2>
+        <h2 className="text-lg font-medium text-[var(--foreground)]">Активные клиенты</h2>
         <p className="mt-4 text-[var(--muted)]">Загрузка…</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
+        <h2 className="text-lg font-medium text-[var(--foreground)]">Активные клиенты</h2>
+        <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300">
+          Ошибка загрузки: {error}
+        </p>
       </div>
     )
   }
@@ -154,7 +171,7 @@ export default function DashboardWeeklyClients() {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="text-lg font-medium text-[var(--foreground)]">Действующие клиенты по неделям</h2>
+        <h2 className="text-lg font-medium text-[var(--foreground)]">Активные клиенты</h2>
         <p className="mt-1 text-sm text-[var(--muted)]">
           В каждом столбце — число клиентов, которым оказывали услуги на этой неделе (по начислениям).
         </p>
@@ -227,8 +244,10 @@ export default function DashboardWeeklyClients() {
           <div className="flex gap-0.5 pb-2 mt-0.5">
             <div className="w-14 shrink-0" />
             <div className="flex gap-0.5 flex-1 min-w-0">
-              {weekKeys.map((key) => {
+              {weekKeys.map((key, idx) => {
                 const isCurrent = key === currentWeekKey
+                const year = yearPart(key)
+                const isFirstOfYear = idx === 0 || yearPart(weekKeys[idx - 1]) !== year
                 return (
                   <div key={key} className="flex w-7 flex-shrink-0 flex-col items-center text-center">
                     <span
@@ -239,10 +258,10 @@ export default function DashboardWeeklyClients() {
                     </span>
                     <span
                       className="mt-0.5 block w-full rounded px-0.5 py-0.5 text-[9px] font-medium leading-tight text-[var(--muted-foreground)]"
-                      style={{ backgroundColor: yearToShade[yearPart(key)] ?? YEAR_SHADES[0] }}
-                      title={yearPart(key)}
+                      style={{ backgroundColor: yearToShade[year] ?? YEAR_SHADES[0] }}
+                      title={year}
                     >
-                      {yearPart(key)}
+                      {isFirstOfYear ? year : ''}
                     </span>
                   </div>
                 )

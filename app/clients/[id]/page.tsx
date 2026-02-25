@@ -52,7 +52,11 @@ type JournalEntry = {
   created_at: string
 }
 
-const formatDate = (d: string | null) => (d ? new Date(d).toLocaleDateString('ru-RU') : '—')
+const formatDate = (d: string | null) => {
+  if (!d) return '—'
+  const t = new Date(d).getTime()
+  return Number.isNaN(t) ? '—' : new Date(d).toLocaleDateString('ru-RU')
+}
 const formatMoney = (n: number) => new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n) + ' ₽'
 
 export default function ClientCardPage() {
@@ -74,6 +78,7 @@ export default function ClientCardPage() {
   }))
   const [saving, setSaving] = useState(false)
   const [confirm, setConfirm] = useState<{ open: boolean; type: 'charge' | 'payment' | 'client'; id: number; data?: Partial<Charge> | Partial<Payment>; action?: 'edit' | 'delete' }>({ open: false, type: 'charge', id: 0 })
+  const [confirmSubmitting, setConfirmSubmitting] = useState(false)
   const [editingCharge, setEditingCharge] = useState<Charge | null>(null)
   const [editingPayment, setEditingPayment] = useState<Payment | null>(null)
   const [services, setServices] = useState<Service[]>([])
@@ -255,30 +260,40 @@ export default function ClientCardPage() {
       setConfirm({ open: false, type: 'charge', id: 0 })
       return
     }
-    if (confirm.action === 'delete') {
-      if (confirm.type === 'charge') {
-        await supabase.from('charges').delete().eq('id', confirm.id)
-        await Promise.all([fetchCharges(), fetchJournalEntries()])
-        setEditingCharge(null)
+    setConfirmSubmitting(true)
+    setError(null)
+    try {
+      if (confirm.action === 'delete') {
+        if (confirm.type === 'charge') {
+          const { error: e } = await supabase.from('charges').delete().eq('id', confirm.id)
+          if (e) { setError(e.message); setConfirmSubmitting(false); return }
+          await Promise.all([fetchCharges(), fetchJournalEntries()])
+          setEditingCharge(null)
+        }
+        if (confirm.type === 'payment') {
+          const { error: e } = await supabase.from('payments').delete().eq('id', confirm.id)
+          if (e) { setError(e.message); setConfirmSubmitting(false); return }
+          await Promise.all([fetchPayments(), fetchJournalEntries()])
+          setEditingPayment(null)
+        }
+      } else {
+        if (confirm.type === 'charge' && confirm.data) {
+          const { error: e } = await supabase.from('charges').update(confirm.data).eq('id', confirm.id)
+          if (e) { setError(e.message); setConfirmSubmitting(false); return }
+          await Promise.all([fetchCharges(), fetchJournalEntries()])
+          setEditingCharge(null)
+        }
+        if (confirm.type === 'payment' && confirm.data) {
+          const { error: e } = await supabase.from('payments').update(confirm.data).eq('id', confirm.id)
+          if (e) { setError(e.message); setConfirmSubmitting(false); return }
+          await Promise.all([fetchPayments(), fetchJournalEntries()])
+          setEditingPayment(null)
+        }
       }
-      if (confirm.type === 'payment') {
-        await supabase.from('payments').delete().eq('id', confirm.id)
-        await Promise.all([fetchPayments(), fetchJournalEntries()])
-        setEditingPayment(null)
-      }
-    } else {
-      if (confirm.type === 'charge' && confirm.data) {
-        await supabase.from('charges').update(confirm.data).eq('id', confirm.id)
-        await Promise.all([fetchCharges(), fetchJournalEntries()])
-        setEditingCharge(null)
-      }
-      if (confirm.type === 'payment' && confirm.data) {
-        await supabase.from('payments').update(confirm.data).eq('id', confirm.id)
-        await Promise.all([fetchPayments(), fetchJournalEntries()])
-        setEditingPayment(null)
-      }
+      setConfirm({ open: false, type: 'charge', id: 0 })
+    } finally {
+      setConfirmSubmitting(false)
     }
-    setConfirm({ open: false, type: 'charge', id: 0 })
   }
 
   const requestChargeUpdate = (data: Partial<Charge>) => {
@@ -795,8 +810,9 @@ export default function ClientCardPage() {
         title="Подтверждение"
         message={confirm.type === 'client' ? 'Точно изменить?' : confirm.action === 'delete' ? 'Точно удалить?' : 'Точно ли вы хотите изменить?'}
         confirmLabel={confirm.action === 'delete' ? 'Да, удалить' : 'Да, изменить'}
+        confirmDisabled={confirmSubmitting}
         onConfirm={handleConfirmEdit}
-        onCancel={() => setConfirm({ open: false, type: 'charge', id: 0 })}
+        onCancel={() => !confirmSubmitting && setConfirm({ open: false, type: 'charge', id: 0 })}
       />
     </div>
   )

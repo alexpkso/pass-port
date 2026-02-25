@@ -81,8 +81,47 @@ export default function ClientsPage() {
   })
   const [employees, setEmployees] = useState<Employee[]>([])
   const [updatingId, setUpdatingId] = useState<number | null>(null)
+  const [vipClientId, setVipClientId] = useState<number | null>(null)
+  const [debtClientId, setDebtClientId] = useState<number | null>(null)
 
   const supabase = createClient()
+
+  // Пасхалка: через 5 сек показываем VIP-значок у клиента с макс. суммой оплат
+  useEffect(() => {
+    if (loading || clients.length === 0) return
+    const t = setTimeout(() => {
+      let maxPaid = 0
+      let bestId: number | null = null
+      clients.forEach((c) => {
+        const paid = clientStats[c.id]?.paid ?? 0
+        if (paid > maxPaid) {
+          maxPaid = paid
+          bestId = c.id
+        }
+      })
+      if (bestId != null && maxPaid > 0) setVipClientId(bestId)
+    }, 5000)
+    return () => clearTimeout(t)
+  }, [loading, clients, clientStats])
+
+  // Пасхалка: через 10 сек показываем "внимание" у клиента с макс. задолженностью
+  useEffect(() => {
+    if (loading || clients.length === 0) return
+    const t = setTimeout(() => {
+      let maxDebt = 0
+      let worstId: number | null = null
+      clients.forEach((c) => {
+        const stats = clientStats[c.id] ?? { charged: 0, paid: 0, start: null, end: null }
+        const debt = stats.charged - stats.paid
+        if (debt > maxDebt) {
+          maxDebt = debt
+          worstId = c.id
+        }
+      })
+      if (worstId != null && maxDebt > 0) setDebtClientId(worstId)
+    }, 10000)
+    return () => clearTimeout(t)
+  }, [loading, clients, clientStats])
 
   const updateClient = async (id: number, patch: Partial<Pick<Client, 'manager_id'>>) => {
     setUpdatingId(id)
@@ -272,9 +311,61 @@ export default function ClientsPage() {
                     return (
                       <tr key={client.id} className="hover:bg-[var(--background)]/80 transition-colors">
                         <td className="px-4 py-2 text-sm font-medium text-[var(--foreground)]">
-                          <Link href={`/clients/${client.id}`} className="text-blue-600 hover:underline dark:text-blue-400">
-                            {client.name}
-                          </Link>
+                          <span className="inline-flex items-center gap-1.5">
+                            <Link href={`/clients/${client.id}`} className="text-blue-600 hover:underline dark:text-blue-400">
+                              {client.name}
+                            </Link>
+                            {/* Место под VIP-значок заранее */}
+                            <span className="inline-flex h-8 w-10 shrink-0 items-center justify-center" style={{ minWidth: '2.5rem' }}>
+                              {vipClientId === client.id && (
+                                <span
+                                  className="vip-badge-enter relative inline-flex h-5 w-5 items-center justify-center"
+                                  title="Лучший клиент по сумме оплат"
+                                >
+                                  {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
+                                    <span
+                                      key={i}
+                                      className={`vip-fw-particle vip-fw-${i} absolute z-20 h-2 w-2 rounded-full bg-emerald-400 shadow-sm dark:bg-emerald-300`}
+                                      style={{ animationDelay: `${i * 0.04}s` }}
+                                    />
+                                  ))}
+                                  <svg
+                                    className="relative z-10 size-5 text-emerald-500 drop-shadow-sm dark:text-emerald-400"
+                                    viewBox="0 0 24 24"
+                                    fill="currentColor"
+                                    aria-hidden
+                                  >
+                                    <path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5m14 3a1 1 0 01-1 1H6a1 1 0 01-1-1v-1h14v1z" />
+                                  </svg>
+                                </span>
+                              )}
+                            </span>
+                            {/* Место под значок «внимание» (макс. задолженность) */}
+                            <span className="inline-flex h-8 w-10 shrink-0 items-center justify-center" style={{ minWidth: '2.5rem' }}>
+                              {debtClientId === client.id && (
+                                <span
+                                  className="vip-badge-enter relative inline-flex h-5 w-5 items-center justify-center"
+                                  title="Наибольшая задолженность по оплатам"
+                                >
+                                  {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
+                                    <span
+                                      key={i}
+                                      className={`vip-fw-particle vip-fw-${i} absolute z-20 h-2 w-2 rounded-full bg-orange-500 shadow-sm dark:bg-orange-400`}
+                                      style={{ animationDelay: `${i * 0.04}s` }}
+                                    />
+                                  ))}
+                                  <svg
+                                    className="relative z-10 size-5 text-orange-600 drop-shadow-sm dark:text-red-500"
+                                    viewBox="0 0 24 24"
+                                    fill="currentColor"
+                                    aria-hidden
+                                  >
+                                    <path d="M12 2L1 21h22L12 2zm0 3.99L19.53 19H4.47L12 5.99zM11 10v4h2v-4h-2zm0 6v2h2v-2h-2z" />
+                                  </svg>
+                                </span>
+                              )}
+                            </span>
+                          </span>
                         </td>
                         <td className="px-4 py-2 text-right text-sm tabular-nums text-[var(--foreground)]">
                           {formatMoney(stats.charged)}

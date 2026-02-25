@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import Nav from './components/Nav'
 import Breadcrumbs from './components/Breadcrumbs'
+import DashboardChurnCharts from './components/DashboardChurnCharts'
 import DashboardSubscriptionMetrics from './components/DashboardSubscriptionMetrics'
 import DashboardWeeklyClients from './components/DashboardWeeklyClients'
 
@@ -117,6 +118,13 @@ export default function Home() {
         <section className="mt-8 sm:mt-10">
           <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-sm sm:p-6">
             <DashboardWeeklyClients />
+          </div>
+        </section>
+
+        {/* Расшифровка метрик: Churn Rate */}
+        <section className="mt-8 sm:mt-10">
+          <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-sm sm:p-6">
+            <DashboardChurnCharts />
           </div>
         </section>
 

@@ -14,7 +14,8 @@ type Employee = {
   id: number
   name: string
   position_id: number | null
-  positions: Position | null
+  /** Supabase для связи many-to-one может вернуть объект или массив */
+  positions: Position | Position[] | null
   created_at: string
 }
 

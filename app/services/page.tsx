@@ -81,11 +81,9 @@ export default function ServicesPage() {
           <h2 className="mb-4 text-lg font-medium text-[var(--foreground)]">
             Новая услуга
           </h2>
-          <form onSubmit={handleSubmit} className="grid max-w-2xl gap-4 sm:grid-cols-2">
-            <div>
-              <label htmlFor="name" className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">
-                Название *
-              </label>
+          <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-4">
+            <label className="min-w-[200px] flex-1">
+              <span className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">Название *</span>
               <input
                 id="name"
                 type="text"
@@ -95,11 +93,9 @@ export default function ServicesPage() {
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-900 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
                 placeholder="Название услуги"
               />
-            </div>
-            <div>
-              <label htmlFor="cost" className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">
-                Стоимость
-              </label>
+            </label>
+            <label className="min-w-[140px]">
+              <span className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">Стоимость</span>
               <input
                 id="cost"
                 type="text"
@@ -109,16 +105,14 @@ export default function ServicesPage() {
                 placeholder="Базовая стоимость"
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-900 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
               />
-            </div>
-            <div className="sm:col-span-2">
-              <button
-                type="submit"
-                disabled={saving}
-                className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-blue-500 disabled:opacity-50 dark:bg-blue-500 dark:hover:bg-blue-400"
-              >
-                {saving ? 'Сохранение…' : 'Добавить услугу'}
-              </button>
-            </div>
+            </label>
+            <button
+              type="submit"
+              disabled={saving}
+              className="h-[42px] shrink-0 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-blue-500 disabled:opacity-50 dark:bg-blue-500 dark:hover:bg-blue-400"
+            >
+              {saving ? 'Сохранение…' : 'Добавить услугу'}
+            </button>
           </form>
         </section>
 

@@ -16,15 +16,21 @@ type Client = {
   name: string
   legal_name: string | null
   manager_id: number | null
-  employees: Employee [] | null
+  employees: Employee | Employee[] | null
   created_at: string
 }
 
 const formatDate = (d: string | null) =>
   d ? new Date(d).toLocaleDateString('ru-RU') : '—'
 
+const formatMoney = (n: number) =>
+  new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(n) + ' ₽'
+
+type ClientStats = { charged: number; paid: number; start: string | null; end: string | null }
+
 export default function ClientsPage() {
   const [clients, setClients] = useState<Client[]>([])
+  const [clientStats, setClientStats] = useState<Record<number, ClientStats>>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -35,11 +41,10 @@ export default function ClientsPage() {
   })
   const [employees, setEmployees] = useState<Employee[]>([])
   const [updatingId, setUpdatingId] = useState<number | null>(null)
-  const [editingLegalName, setEditingLegalName] = useState<Record<number, string>>({})
 
   const supabase = createClient()
 
-  const updateClient = async (id: number, patch: Partial<Pick<Client, 'legal_name' | 'manager_id'>>) => {
+  const updateClient = async (id: number, patch: Partial<Pick<Client, 'manager_id'>>) => {
     setUpdatingId(id)
     setError(null)
     const { error: updateError } = await supabase.from('clients').update(patch).eq('id', id)
@@ -51,15 +56,31 @@ export default function ClientsPage() {
   const fetchClients = async () => {
     setLoading(true)
     setError(null)
-    const { data, error: fetchError } = await supabase
-      .from('clients')
-      .select('id, name, legal_name, manager_id, created_at, employees(id, name)')
-      .order('created_at', { ascending: false })
-    if (fetchError) {
-      setError(fetchError.message)
+    const [clientsRes, chargesRes, paymentsRes] = await Promise.all([
+      supabase.from('clients').select('id, name, manager_id, created_at, employees(id, name)').order('id', { ascending: false }),
+      supabase.from('charges').select('client_id, amount, start_date, end_date'),
+      supabase.from('payments').select('client_id, amount'),
+    ])
+    if (clientsRes.error) {
+      setError(clientsRes.error.message)
       setClients([])
+      setClientStats({})
     } else {
-      setClients((data ?? []) as Client[])
+      setClients((clientsRes.data ?? []) as Client[])
+      const stats: Record<number, ClientStats> = {}
+      const charges = (chargesRes.data ?? []) as { client_id: number; amount: number; start_date: string | null; end_date: string | null }[]
+      const payments = (paymentsRes.data ?? []) as { client_id: number; amount: number }[]
+      charges.forEach((c) => {
+        if (!stats[c.client_id]) stats[c.client_id] = { charged: 0, paid: 0, start: null, end: null }
+        stats[c.client_id].charged += Number(c.amount)
+        if (c.start_date && (!stats[c.client_id].start || c.start_date < stats[c.client_id].start!)) stats[c.client_id].start = c.start_date
+        if (c.end_date && (!stats[c.client_id].end || c.end_date > stats[c.client_id].end!)) stats[c.client_id].end = c.end_date
+      })
+      payments.forEach((p) => {
+        if (!stats[p.client_id]) stats[p.client_id] = { charged: 0, paid: 0, start: null, end: null }
+        stats[p.client_id].paid += Number(p.amount)
+      })
+      setClientStats(stats)
     }
     setLoading(false)
   }
@@ -108,11 +129,9 @@ export default function ClientsPage() {
           <h2 className="mb-4 text-lg font-medium text-[var(--foreground)]">
             Новый клиент
           </h2>
-          <form onSubmit={handleSubmit} className="grid gap-4 sm:grid-cols-2">
-            <div className="sm:col-span-2">
-              <label htmlFor="name" className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">
-                Название *
-              </label>
+          <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-4">
+            <label className="min-w-[200px] flex-1">
+              <span className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">Название *</span>
               <input
                 id="name"
                 type="text"
@@ -122,11 +141,9 @@ export default function ClientsPage() {
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-900 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-400"
                 placeholder="Название клиента"
               />
-            </div>
-            <div className="sm:col-span-2">
-              <label htmlFor="legal_name" className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">
-                Юридическое название
-              </label>
+            </label>
+            <label className="min-w-[200px] flex-1">
+              <span className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">Юридическое название</span>
               <input
                 id="legal_name"
                 type="text"
@@ -135,11 +152,9 @@ export default function ClientsPage() {
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-900 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-400"
                 placeholder="ООО «Пример»"
               />
-            </div>
-            <div>
-              <label htmlFor="manager_id" className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">
-                Менеджер
-              </label>
+            </label>
+            <label className="min-w-[160px]">
+              <span className="mb-1 block text-sm font-medium text-[var(--muted-foreground)]">Менеджер</span>
               <select
                 id="manager_id"
                 value={form.manager_id}
@@ -148,21 +163,17 @@ export default function ClientsPage() {
               >
                 <option value="">— не выбран</option>
                 {employees.map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.name}
-                  </option>
+                  <option key={e.id} value={e.id}>{e.name}</option>
                 ))}
               </select>
-            </div>
-            <div className="sm:col-span-2">
-              <button
-                type="submit"
-                disabled={saving}
-                className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-blue-500 disabled:opacity-50 disabled:pointer-events-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:bg-blue-500 dark:hover:bg-blue-400 dark:focus:ring-blue-400"
-              >
-                {saving ? 'Сохранение…' : 'Добавить клиента'}
-              </button>
-            </div>
+            </label>
+            <button
+              type="submit"
+              disabled={saving}
+              className="h-[42px] shrink-0 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-blue-500 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:bg-blue-500 dark:hover:bg-blue-400"
+            >
+              {saving ? 'Сохранение…' : 'Добавить клиента'}
+            </button>
           </form>
         </section>
 
@@ -189,65 +200,52 @@ export default function ClientsPage() {
               <table className="min-w-full divide-y divide-[var(--border)]">
                 <thead className="sticky top-0 z-10 bg-[var(--card)] shadow-sm">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
-                      Название
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
-                      Юр. название
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
-                      Менеджер
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
-                      Создан
-                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Название</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Начислено</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Оплачено</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Начало</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Завершение</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Менеджер</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border)]">
-                  {clients.map((client) => (
-                    <tr key={client.id} className="hover:bg-[var(--background)]/80 transition-colors">
-                      <td className="px-4 py-2 text-sm font-medium text-[var(--foreground)]">
-                        <Link href={`/clients/${client.id}`} className="text-blue-600 hover:underline dark:text-blue-400">
-                          {client.name}
-                        </Link>
-                      </td>
-                      <td className="px-4 py-2">
-                        <input
-                          value={editingLegalName[client.id] ?? client.legal_name ?? ''}
-                          onChange={(e) => setEditingLegalName((s) => ({ ...s, [client.id]: e.target.value }))}
-                          onBlur={(e) => {
-                            const v = e.target.value.trim() || null
-                            updateClient(client.id, { legal_name: v })
-                            setEditingLegalName((s) => {
-                              const next = { ...s }
-                              delete next[client.id]
-                              return next
-                            })
-                          }}
-                          onFocus={() => setEditingLegalName((s) => ({ ...s, [client.id]: client.legal_name ?? '' }))}
-                          disabled={updatingId === client.id}
-                          className="w-full min-w-[120px] rounded border border-zinc-200 bg-white px-2 py-1 text-sm text-zinc-900 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
-                          placeholder="—"
-                        />
-                      </td>
-                      <td className="px-4 py-2">
-                        <select
-                          value={client.manager_id ?? ''}
-                          onChange={(e) => updateClient(client.id, { manager_id: e.target.value ? Number(e.target.value) : null })}
-                          disabled={updatingId === client.id}
-                          className="min-w-[140px] rounded border border-zinc-200 bg-white px-2 py-1 text-sm text-zinc-900 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
-                        >
-                          <option value="">—</option>
-                          {employees.map((e) => (
-                            <option key={e.id} value={e.id}>{e.name}</option>
-                          ))}
-                        </select>
-                      </td>
-                      <td className="px-4 py-2 text-sm text-[var(--muted)]">
-                        {formatDate(client.created_at)}
-                      </td>
-                    </tr>
-                  ))}
+                  {clients.map((client) => {
+                    const stats = clientStats[client.id] ?? { charged: 0, paid: 0, start: null, end: null }
+                    return (
+                      <tr key={client.id} className="hover:bg-[var(--background)]/80 transition-colors">
+                        <td className="px-4 py-2 text-sm font-medium text-[var(--foreground)]">
+                          <Link href={`/clients/${client.id}`} className="text-blue-600 hover:underline dark:text-blue-400">
+                            {client.name}
+                          </Link>
+                        </td>
+                        <td className="px-4 py-2 text-right text-sm tabular-nums text-[var(--foreground)]">
+                          {formatMoney(stats.charged)}
+                        </td>
+                        <td className="px-4 py-2 text-right text-sm tabular-nums text-[var(--foreground)]">
+                          {formatMoney(stats.paid)}
+                        </td>
+                        <td className="px-4 py-2 text-sm text-[var(--muted)]">
+                          {formatDate(stats.start)}
+                        </td>
+                        <td className="px-4 py-2 text-sm text-[var(--muted)]">
+                          {formatDate(stats.end)}
+                        </td>
+                        <td className="px-4 py-2">
+                          <select
+                            value={client.manager_id ?? ''}
+                            onChange={(e) => updateClient(client.id, { manager_id: e.target.value ? Number(e.target.value) : null })}
+                            disabled={updatingId === client.id}
+                            className="min-w-[140px] rounded border border-zinc-200 bg-white px-2 py-1 text-sm text-zinc-900 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
+                          >
+                            <option value="">—</option>
+                            {employees.map((e) => (
+                              <option key={e.id} value={e.id}>{e.name}</option>
+                            ))}
+                          </select>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

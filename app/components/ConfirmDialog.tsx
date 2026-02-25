@@ -4,11 +4,12 @@ type Props = {
   open: boolean
   title: string
   message: string
+  confirmLabel?: string
   onConfirm: () => void
   onCancel: () => void
 }
 
-export default function ConfirmDialog({ open, title, message, onConfirm, onCancel }: Props) {
+export default function ConfirmDialog({ open, title, message, confirmLabel = 'Да, изменить', onConfirm, onCancel }: Props) {
   if (!open) return null
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -36,7 +37,7 @@ export default function ConfirmDialog({ open, title, message, onConfirm, onCance
             onClick={onConfirm}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
           >
-            Да, изменить
+            {confirmLabel}
           </button>
         </div>
       </div>

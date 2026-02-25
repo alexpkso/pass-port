@@ -8,6 +8,7 @@ const links = [
   { href: '/clients', label: 'Клиенты' },
   { href: '/employees', label: 'Сотрудники' },
   { href: '/services', label: 'Услуги' },
+  { href: '/reports', label: 'Отчёты' },
   { href: '/about', label: 'О сервисе' },
 ]
 

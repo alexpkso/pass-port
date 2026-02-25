@@ -3,11 +3,59 @@ import Nav from './components/Nav'
 import Breadcrumbs from './components/Breadcrumbs'
 import DashboardWeeklyClients from './components/DashboardWeeklyClients'
 
+const iconClass = 'size-8 sm:size-9 text-blue-500 dark:text-blue-400 opacity-90 group-hover:opacity-100 transition-opacity'
+
 const navCards = [
-  { href: '/clients', title: 'Клиенты', desc: 'Учёт клиентов и подписок', icon: '👥' },
-  { href: '/employees', title: 'Сотрудники', desc: 'Список сотрудников и должности', icon: '👤' },
-  { href: '/services', title: 'Услуги', desc: 'Список услуг и базовые стоимости', icon: '📋' },
-  { href: '/about', title: 'О сервисе', desc: 'Описание сервиса', icon: 'ℹ️' },
+  {
+    href: '/clients',
+    title: 'Клиенты',
+    desc: 'Учёт клиентов и подписок',
+    icon: (
+      <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+      </svg>
+    ),
+  },
+  {
+    href: '/employees',
+    title: 'Сотрудники',
+    desc: 'Список сотрудников и должности',
+    icon: (
+      <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+      </svg>
+    ),
+  },
+  {
+    href: '/services',
+    title: 'Услуги',
+    desc: 'Список услуг и базовые стоимости',
+    icon: (
+      <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+      </svg>
+    ),
+  },
+  {
+    href: '/reports',
+    title: 'Отчёты',
+    desc: 'Карточка 62 счёта и задолженности',
+    icon: (
+      <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+      </svg>
+    ),
+  },
+  {
+    href: '/about',
+    title: 'О сервисе',
+    desc: 'Описание сервиса',
+    icon: (
+      <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+    ),
+  },
 ]
 
 export default function Home() {
@@ -40,14 +88,14 @@ export default function Home() {
 
         {/* Карточки разделов в один ряд */}
         <section className="mt-8 sm:mt-10">
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-5">
             {navCards.map((card) => (
               <Link
                 key={card.href}
                 href={card.href}
                 className="group flex flex-col rounded-xl border border-[var(--border)] bg-[var(--card)] p-5 shadow-sm transition-all hover:border-blue-500/50 hover:shadow-md sm:p-6"
               >
-                <span className="text-2xl sm:text-3xl" aria-hidden>{card.icon}</span>
+                {card.icon}
                 <span className="mt-2 text-lg font-medium text-[var(--foreground)] group-hover:text-[var(--accent)]">
                   {card.title}
                 </span>

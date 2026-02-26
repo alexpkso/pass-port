@@ -604,6 +604,51 @@ export default function ClientCardPage() {
     }
   }
 
+  // Статистика по каждой услуге отдельно (для таблицы карточки оказания услуг)
+  const allServiceStats = uniqueServices.map(svc => {
+    const svcCharges = charges.filter(c => c.service_name === svc)
+    const svcPayments = payments.filter(p => p.service_name === svc)
+    const charged = svcCharges.reduce((s, c) => s + Number(c.amount), 0)
+    const paid = svcPayments.reduce((s, p) => s + Number(p.amount), 0)
+    let rendered = 0
+    let svcTotalWeeks = 0
+    let svcWeeksRendered = 0
+    svcCharges.forEach(c => {
+      const startStr = c.start_date || c.created_at
+      const endStr = c.end_date || c.start_date || c.created_at
+      if (!startStr) return
+      const start = new Date(startStr); start.setHours(0,0,0,0)
+      const end = endStr ? new Date(endStr) : new Date(start); end.setHours(0,0,0,0)
+      const freezeStartMs = c.freeze_start ? new Date(c.freeze_start + 'T00:00:00').getTime() : null
+      const mondayEnd = getWeekMonday(end)
+      const firstWeekMonday = new Date(getWeekMonday(start)); firstWeekMonday.setDate(firstWeekMonday.getDate() + 7)
+      if (firstWeekMonday.getTime() > mondayEnd.getTime()) {
+        svcTotalWeeks += 1
+        const weekRendered = mondayEnd.getTime() <= currentWeekMonday.getTime() && (freezeStartMs === null || mondayEnd.getTime() < freezeStartMs)
+        if (weekRendered) { rendered += Number(c.amount); svcWeeksRendered += 1 }
+        return
+      }
+      const cur = new Date(firstWeekMonday); let numWeeks = 0
+      while (cur.getTime() <= mondayEnd.getTime()) { numWeeks += 1; cur.setDate(cur.getDate() + 7) }
+      const apw = Number(c.amount) / numWeeks
+      svcTotalWeeks += numWeeks
+      cur.setTime(firstWeekMonday.getTime())
+      while (cur.getTime() <= mondayEnd.getTime()) {
+        if (cur.getTime() <= currentWeekMonday.getTime() && (freezeStartMs === null || cur.getTime() < freezeStartMs)) { rendered += apw; svcWeeksRendered += 1 }
+        cur.setDate(cur.getDate() + 7)
+      }
+    })
+    let svcDebtClient: number | null = null
+    let svcDebtUs: number | null = null
+    if (svcTotalWeeks > 0 && charged > 0) {
+      const apw = charged / svcTotalWeeks
+      const weeksPaid = paid / apw
+      if (svcWeeksRendered > weeksPaid) { svcDebtClient = Math.round(svcWeeksRendered - weeksPaid) * apw }
+      else if (weeksPaid > svcWeeksRendered) { svcDebtUs = Math.round(weeksPaid - svcWeeksRendered) * apw }
+    }
+    return { name: svc, charged, paid, toPay: charged - paid, rendered, debtClient: svcDebtClient, debtUs: svcDebtUs }
+  })
+
   // Карточка счёта 62 по услугам за период
   const entries62 = journalEntries.filter(e => e.debit_account_code === '62' || e.credit_account_code === '62')
   const cardServices = Array.from(new Set(entries62.map(e => e.service_name))).sort()
@@ -623,6 +668,40 @@ export default function ClientCardPage() {
     (acc, r) => ({ opening: acc.opening + r.opening, charged: acc.charged + r.charged, paid: acc.paid + r.paid, closing: acc.closing + r.closing }),
     { opening: 0, charged: 0, paid: 0, closing: 0 }
   )
+
+  // ОСВ: оборотно-сальдовая ведомость по счетам в разрезе услуг
+  const accountName: Record<string, string> = {
+    '62': 'Расчёты с покупателями',
+    '98': 'Доходы будущих периодов',
+    '90': 'Продажи',
+    '51': 'Расчётные счета',
+  }
+  // Active accounts: closing balance = Дт - Кт; passive: Кт - Дт
+  const activeAccounts = new Set(['62', '51'])
+  const osvSvcMap = new Map<string, Map<string, { dt: number; kt: number }>>()
+  journalEntries.forEach(e => {
+    const svc = e.service_name || '(без услуги)'
+    if (!osvSvcMap.has(svc)) osvSvcMap.set(svc, new Map())
+    const m = osvSvcMap.get(svc)!
+    const dtAcc = e.debit_account_code
+    if (!m.has(dtAcc)) m.set(dtAcc, { dt: 0, kt: 0 })
+    m.get(dtAcc)!.dt += Number(e.amount)
+    const ktAcc = e.credit_account_code
+    if (!m.has(ktAcc)) m.set(ktAcc, { dt: 0, kt: 0 })
+    m.get(ktAcc)!.kt += Number(e.amount)
+  })
+  const osvData = Array.from(osvSvcMap.entries())
+    .map(([name, accMap]) => {
+      const rows = Array.from(accMap.entries())
+        .map(([account, v]) => ({ account, dt: v.dt, kt: v.kt }))
+        .sort((a, b) => a.account.localeCompare(b.account))
+      const totalDt = rows.reduce((s, r) => s + r.dt, 0)
+      const totalKt = rows.reduce((s, r) => s + r.kt, 0)
+      return { name, rows, totalDt, totalKt }
+    })
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const osvClosing = (acc: string, dt: number, kt: number) =>
+    activeAccounts.has(acc) ? dt - kt : kt - dt
 
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
@@ -1069,72 +1148,148 @@ export default function ClientCardPage() {
           {uniqueServices.length === 0 ? (
             <p className="mt-4 text-sm text-[var(--muted)]">Нет начислений.</p>
           ) : (
-            <>
-              {singleService ? (
-                <p className="mt-2 text-sm text-[var(--muted)]">Услуга: <span className="font-medium text-[var(--foreground)]">{activeService}</span></p>
-              ) : (
-                <label className="mt-2 block">
-                  <span className="mb-1 block text-sm text-[var(--muted)]">Услуга</span>
-                  <select
-                    value={selectedServiceFilter || uniqueServices[0]}
-                    onChange={e => setSelectedServiceFilter(e.target.value)}
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
-                  >
-                    {uniqueServices.map(s => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              <div className="mt-4 overflow-hidden rounded-lg border border-rose-200 dark:border-rose-800/60">
-              <dl className="grid divide-x divide-y divide-rose-200/80 dark:divide-rose-800/40 sm:grid-cols-2 lg:grid-cols-5">
-                <div><dt className="flex h-12 items-center bg-[var(--muted)]/10 px-3 py-2 text-sm font-medium text-[var(--muted)]">Сумма по контрактам<br />за все время</dt><dd className="px-3 py-2 font-medium">{formatMoney(Math.round(totalCharged))}</dd></div>
-                <div><dt className="flex h-12 items-center bg-[var(--muted)]/10 px-3 py-2 text-sm font-medium text-[var(--muted)]">Сумма оплат<br />за все время</dt><dd className="px-3 py-2 font-medium">{formatMoney(Math.round(totalPaid))}</dd></div>
-                <div><dt className="flex h-12 items-center bg-[var(--muted)]/10 px-3 py-2 text-sm font-medium text-[var(--muted)]">Сумма к оплате</dt><dd className="px-3 py-2 font-medium">{formatMoney(Math.round(Math.max(0, toPay)))}</dd></div>
-                <div><dt className="flex h-12 items-center bg-[var(--muted)]/10 px-3 py-2 text-sm font-medium text-[var(--muted)]">Сумма оказанных услуг</dt><dd className="px-3 py-2 font-medium">{formatMoney(Math.round(sumRendered))}</dd></div>
-                {activeService && (
-                  <div>
-                    <dt className="flex h-12 items-center bg-[var(--muted)]/10 px-3 py-2 text-sm font-medium text-[var(--muted)]">Задолженность</dt>
-                    <dd className="px-3 py-2 font-medium">
-                      {debtClient != null && debtClient > 0
-                        ? <span className="text-red-600 dark:text-red-400">Задолженность клиента: {formatMoney(Math.round(debtClient))} ({debtWeeks} нед.)</span>
-                        : debtUs != null && debtUs > 0
-                          ? <span className="text-green-600 dark:text-green-400">Наша задолженность перед клиентом: {formatMoney(Math.round(debtUs))} ({debtWeeks} нед.)</span>
-                          : '—'}
-                    </dd>
-                  </div>
-                )}
-              </dl>
+            <div className="mt-4 overflow-auto rounded-lg border border-[var(--border)]">
+              <table className="min-w-full text-sm">
+                <thead className="bg-[var(--muted)]/10">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Услуга</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Начислено</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Оплачено</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">К оплате</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Оказано</th>
+                    <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Задолженность</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--border)]">
+                  {allServiceStats.map(s => (
+                    <tr key={s.name} className="border-t border-[var(--border)]">
+                      <td className="px-3 py-2 font-medium">{s.name}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(s.charged))}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(s.paid))}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(Math.max(0, s.toPay)))}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(s.rendered))}</td>
+                      <td className="px-3 py-2 text-sm">
+                        {s.debtClient != null && s.debtClient > 0
+                          ? <span className="text-red-600 dark:text-red-400">Клиент: {formatMoney(Math.round(s.debtClient))}</span>
+                          : s.debtUs != null && s.debtUs > 0
+                            ? <span className="text-green-600 dark:text-green-400">Мы: {formatMoney(Math.round(s.debtUs))}</span>
+                            : <span className="text-[var(--muted)]">—</span>}
+                      </td>
+                    </tr>
+                  ))}
+                  {allServiceStats.length > 1 && (
+                    <tr className="border-t-2 border-[var(--border)] bg-[var(--muted)]/5 font-medium">
+                      <td className="px-3 py-2">Итого</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(allServiceStats.reduce((s, r) => s + r.charged, 0)))}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(allServiceStats.reduce((s, r) => s + r.paid, 0)))}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(Math.max(0, allServiceStats.reduce((s, r) => s + r.toPay, 0))))}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(allServiceStats.reduce((s, r) => s + r.rendered, 0)))}</td>
+                      <td className="px-3 py-2" />
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
-            </>
           )}
-          <p className="mt-3 text-xs text-[var(--muted)]">Наша задолженность — это, сколько недель оказания услуг мы ещё должны клиенту.</p>
+          <p className="mt-3 text-xs text-[var(--muted)]">«Мы» — задолженность: клиент переплатил, оказываем неделями вперёд. «Клиент» — должен за оказанные, но не оплаченные недели.</p>
         </section>
 
         {/* Сводка и график начислений */}
-        <section className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-          <h2 className="text-lg font-medium text-[var(--foreground)]">Дашборд начислений</h2>
-          {uniqueServices.length >= 2 ? (
-            <label className="mt-2 block">
-              <span className="mb-1 block text-sm text-[var(--muted)]">Услуга</span>
-              <select
-                value={selectedServiceFilter || uniqueServices[0]}
-                onChange={e => setSelectedServiceFilter(e.target.value)}
-                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
-              >
-                {uniqueServices.map(s => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </label>
-          ) : activeService ? (
-            <p className="mt-1 text-sm text-[var(--muted)]">По услуге: {activeService}</p>
-          ) : null}
-          <p className="mt-1 text-sm text-[var(--muted)]">Всего начислено: {formatMoney(totalCharged)} · Оплачено: {formatMoney(totalPaid)} · Доля оплаты: {totalCharged ? Math.round((totalPaid / totalCharged) * 100) : 0}%</p>
-          <div className="mt-6">
-            <ClientChargesChart charges={activeService ? chargesFiltered : charges} payments={activeService ? paymentsFiltered : payments} />
-          </div>
-        </section>
+        {(() => {
+          const dashCharged = charges.reduce((s, c) => s + Number(c.amount), 0)
+          const dashPaid = payments.reduce((s, p) => s + Number(p.amount), 0)
+          return (
+            <section className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
+              <h2 className="text-lg font-medium text-[var(--foreground)]">Дашборд начислений</h2>
+              <p className="mt-1 text-sm text-[var(--muted)]">Всего начислено: {formatMoney(dashCharged)} · Оплачено: {formatMoney(dashPaid)} · Доля оплаты: {dashCharged ? Math.round((dashPaid / dashCharged) * 100) : 0}%</p>
+              <div className="mt-6">
+                <ClientChargesChart charges={charges} payments={payments} />
+              </div>
+            </section>
+          )
+        })()}
+
+        {/* Оборотно-сальдовая ведомость по счетам в разрезе услуг */}
+        {osvData.length > 0 && (
+          <section className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
+            <h2 className="mb-1 text-lg font-medium text-[var(--foreground)]">Оборотно-сальдовая ведомость</h2>
+            <p className="mb-4 text-sm text-[var(--muted)]">По счетам бухгалтерского учёта в разрезе услуг. Сальдо начальное = 0 (все операции за весь период).</p>
+            <div className="overflow-auto rounded-lg border border-[var(--border)]">
+              <table className="min-w-full text-sm">
+                <thead className="bg-[var(--muted)]/10">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Услуга / Счёт</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо нач.</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Оборот Дт</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Оборот Кт</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо конечн.</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Дт/Кт</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {osvData.map((svc, si) => (
+                    <>
+                      {/* Заголовок услуги */}
+                      <tr key={`svc-${si}`} className="bg-[var(--muted)]/5 border-t border-[var(--border)]">
+                        <td colSpan={6} className="px-3 py-2 font-semibold text-[var(--foreground)]">{svc.name}</td>
+                      </tr>
+                      {/* Строки по счетам */}
+                      {svc.rows.map(row => {
+                        const closing = osvClosing(row.account, row.dt, row.kt)
+                        const isDebitBalance = closing >= 0
+                        return (
+                          <tr key={`${si}-${row.account}`} className="border-t border-[var(--border)]/50 hover:bg-[var(--muted)]/5">
+                            <td className="px-3 py-2 pl-6 text-[var(--muted)]">
+                              <span className="font-medium text-[var(--foreground)]">{row.account}</span>
+                              {accountName[row.account] ? <span className="ml-2 text-xs text-[var(--muted)]">{accountName[row.account]}</span> : null}
+                            </td>
+                            <td className="px-3 py-2 text-right text-[var(--muted)]">—</td>
+                            <td className="px-3 py-2 text-right">{row.dt > 0 ? formatMoneyInt(row.dt) : '—'}</td>
+                            <td className="px-3 py-2 text-right">{row.kt > 0 ? formatMoneyInt(row.kt) : '—'}</td>
+                            <td className="px-3 py-2 text-right font-medium">{closing !== 0 ? formatMoneyInt(Math.abs(closing)) : '—'}</td>
+                            <td className={`px-3 py-2 text-right text-xs font-semibold ${isDebitBalance ? 'text-blue-600 dark:text-blue-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                              {closing !== 0 ? (isDebitBalance ? 'Дт' : 'Кт') : '—'}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                      {/* Итого по услуге */}
+                      {svc.rows.length > 1 && (
+                        <tr key={`tot-${si}`} className="border-t border-[var(--border)] bg-[var(--muted)]/5 font-medium">
+                          <td className="px-3 py-2 pl-6 text-[var(--muted)]">Итого по услуге</td>
+                          <td className="px-3 py-2 text-right text-[var(--muted)]">—</td>
+                          <td className="px-3 py-2 text-right">{svc.totalDt > 0 ? formatMoneyInt(svc.totalDt) : '—'}</td>
+                          <td className="px-3 py-2 text-right">{svc.totalKt > 0 ? formatMoneyInt(svc.totalKt) : '—'}</td>
+                          <td className="px-3 py-2 text-right">{svc.totalDt !== svc.totalKt ? formatMoneyInt(Math.abs(svc.totalDt - svc.totalKt)) : '—'}</td>
+                          <td className={`px-3 py-2 text-right text-xs font-semibold ${svc.totalDt >= svc.totalKt ? 'text-blue-600 dark:text-blue-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                            {svc.totalDt !== svc.totalKt ? (svc.totalDt >= svc.totalKt ? 'Дт' : 'Кт') : '—'}
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  ))}
+                  {/* Итого по клиенту */}
+                  {osvData.length > 1 && (() => {
+                    const grandDt = osvData.reduce((s, d) => s + d.totalDt, 0)
+                    const grandKt = osvData.reduce((s, d) => s + d.totalKt, 0)
+                    return (
+                      <tr className="border-t-2 border-[var(--border)] bg-[var(--muted)]/10 font-bold">
+                        <td className="px-3 py-2">Итого по клиенту</td>
+                        <td className="px-3 py-2 text-right text-[var(--muted)]">—</td>
+                        <td className="px-3 py-2 text-right">{grandDt > 0 ? formatMoneyInt(grandDt) : '—'}</td>
+                        <td className="px-3 py-2 text-right">{grandKt > 0 ? formatMoneyInt(grandKt) : '—'}</td>
+                        <td className="px-3 py-2 text-right">{grandDt !== grandKt ? formatMoneyInt(Math.abs(grandDt - grandKt)) : '—'}</td>
+                        <td className={`px-3 py-2 text-right text-xs font-semibold ${grandDt >= grandKt ? 'text-blue-600 dark:text-blue-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                          {grandDt !== grandKt ? (grandDt >= grandKt ? 'Дт' : 'Кт') : '—'}
+                        </td>
+                      </tr>
+                    )
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
       </div>
 
       <ConfirmDialog
@@ -1334,8 +1489,14 @@ function weekKey(d: Date): string {
   return m.toISOString().slice(0, 10)
 }
 
-const PAID_BLUE = '#1e40af'
-const UNPAID_BLUE = '#93c5fd'
+const SERVICE_PALETTE = [
+  { paid: '#1e40af', unpaid: '#93c5fd' }, // синий
+  { paid: '#6d28d9', unpaid: '#c4b5fd' }, // фиолетовый
+  { paid: '#0f766e', unpaid: '#5eead4' }, // бирюзовый
+  { paid: '#b45309', unpaid: '#fcd34d' }, // янтарный
+  { paid: '#15803d', unpaid: '#86efac' }, // зелёный
+  { paid: '#be185d', unpaid: '#f9a8d4' }, // розовый
+]
 const WINDOW_WEEKS = 25
 
 const Y_STEPS = [1000, 2000, 5000, 10000, 20000, 50000]
@@ -1430,6 +1591,8 @@ function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments
   })
 
   const allServices = Array.from(new Set(charges.map(c => c.service_name)))
+  const serviceColorMap: Record<string, { paid: string; unpaid: string }> = {}
+  allServices.forEach((svc, i) => { serviceColorMap[svc] = SERVICE_PALETTE[i % SERVICE_PALETTE.length]! })
 
   const windowSize = Math.min(WINDOW_WEEKS, allWeekKeys.length)
   const maxStart = Math.max(0, allWeekKeys.length - windowSize)
@@ -1453,6 +1616,17 @@ function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments
   const yearsInView = Array.from(new Set(weekKeys.map(yearPart))).sort()
   const yearToShade: Record<string, string> = {}
   yearsInView.forEach((y, i) => { yearToShade[y] = yearShades[i % yearShades.length] })
+  // Группы подряд идущих недель одного года — одна полоса на год (как на главной странице)
+  const yearGroups: { year: string; count: number }[] = []
+  weekKeys.forEach((key) => {
+    const y = yearPart(key)
+    if (yearGroups.length > 0 && yearGroups[yearGroups.length - 1].year === y)
+      yearGroups[yearGroups.length - 1].count += 1
+    else yearGroups.push({ year: y, count: 1 })
+  })
+  const COL_PX = 28
+  const GAP_PX = 2
+  const stripWidth = (count: number) => count * (COL_PX + GAP_PX) - GAP_PX
 
   useEffect(() => {
     if (!drag) return
@@ -1530,16 +1704,17 @@ function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments
                         {(allServices.length ? allServices : ['']).map((serviceName) => {
                           const serviceAmount = serviceName ? (data.byService[serviceName] ?? 0) : data.total
                           if (serviceAmount <= 0) return null
+                          const svcColor = serviceColorMap[serviceName] ?? SERVICE_PALETTE[0]!
                           const segmentHeight = (serviceAmount / data.total) * barHeightPx
                           const paidHeightPx = Math.round(segmentHeight * paidRatio)
                           const unpaidHeightPx = segmentHeight - paidHeightPx
                           return (
                             <React.Fragment key={serviceName || 'total'}>
                               {unpaidHeightPx > 0 && (
-                                <div className="w-full flex-shrink-0 border-t border-white/30" style={{ height: unpaidHeightPx, background: isFuture ? `repeating-linear-gradient(-45deg, ${UNPAID_BLUE}, ${UNPAID_BLUE} 2px, transparent 2px, transparent 4px)` : UNPAID_BLUE }} />
+                                <div className="w-full flex-shrink-0 border-t border-white/30" style={{ height: unpaidHeightPx, background: isFuture ? `repeating-linear-gradient(-45deg, ${svcColor.unpaid}, ${svcColor.unpaid} 2px, transparent 2px, transparent 4px)` : svcColor.unpaid }} />
                               )}
                               {paidHeightPx > 0 && (
-                                <div className="w-full flex-shrink-0 border-t border-white/30" style={{ height: paidHeightPx, background: isFuture ? `repeating-linear-gradient(-45deg, ${PAID_BLUE}, ${PAID_BLUE} 2px, transparent 2px, transparent 4px)` : PAID_BLUE }} />
+                                <div className="w-full flex-shrink-0 border-t border-white/30" style={{ height: paidHeightPx, background: isFuture ? `repeating-linear-gradient(-45deg, ${svcColor.paid}, ${svcColor.paid} 2px, transparent 2px, transparent 4px)` : svcColor.paid }} />
                               )}
                             </React.Fragment>
                           )
@@ -1562,7 +1737,7 @@ function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments
             </div>
           </div>
           {/* Подписи дат — ниже линии нуля */}
-          <div className="flex gap-0.5 pb-2 mt-0.5">
+          <div className="flex gap-0.5 mt-0.5">
             <div className="w-14 shrink-0" />
             <div className="flex gap-0.5 flex-1 min-w-0">
               {weekKeys.map((key) => {
@@ -1572,23 +1747,51 @@ function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments
                     <span className={`block text-[10px] leading-tight ${isCurrent ? 'font-semibold text-blue-600 dark:text-blue-400' : 'text-[var(--muted)]'}`} title={isCurrent ? 'Текущая неделя' : key}>
                       {datePart(key)}
                     </span>
-                    <span
-                      className="mt-0.5 block w-full rounded px-0.5 py-0.5 text-[9px] font-medium leading-tight text-[var(--muted-foreground)]"
-                      style={{ backgroundColor: yearToShade[yearPart(key)] ?? '#fce7f3' }}
-                      title={yearPart(key)}
-                    >
-                      {yearPart(key)}
-                    </span>
                   </div>
                 )
               })}
             </div>
           </div>
+          {/* Одна полоса на год с подписью года — как на главной странице */}
+          <div className="flex mt-0.5 gap-0.5 pb-2">
+            <div className="w-14 shrink-0" />
+            <div className="flex gap-0.5" style={{ width: stripWidth(weekKeys.length) }}>
+              {yearGroups.map((g) => (
+                <div
+                  key={g.year}
+                  className="flex items-center rounded px-1 py-0.5 text-[9px] font-medium leading-tight text-[var(--muted-foreground)] shrink-0"
+                  style={{
+                    width: stripWidth(g.count),
+                    backgroundColor: yearToShade[g.year] ?? yearShades[0],
+                  }}
+                  title={g.year}
+                >
+                  {g.year}
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
-      <div className="flex flex-wrap gap-4 text-xs text-[var(--muted)]">
-        <span><span className="inline-block w-3 h-3 rounded mr-1" style={{ background: PAID_BLUE }} /> Оплаченные недели</span>
-        <span><span className="inline-block w-3 h-3 rounded mr-1" style={{ background: UNPAID_BLUE }} /> Неоплаченные недели</span>
+      <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-[var(--muted)]">
+        {allServices.length > 0 ? allServices.map(svc => {
+          const c = serviceColorMap[svc] ?? SERVICE_PALETTE[0]!
+          return (
+            <span key={svc} className="flex items-center gap-1.5">
+              <span className="inline-flex gap-0.5">
+                <span className="inline-block w-3 h-3 rounded-sm" style={{ background: c.paid }} />
+                <span className="inline-block w-3 h-3 rounded-sm" style={{ background: c.unpaid }} />
+              </span>
+              {svc}
+            </span>
+          )
+        }) : (
+          <>
+            <span><span className="inline-block w-3 h-3 rounded mr-1" style={{ background: SERVICE_PALETTE[0]!.paid }} /> Оплачено</span>
+            <span><span className="inline-block w-3 h-3 rounded mr-1" style={{ background: SERVICE_PALETTE[0]!.unpaid }} /> Не оплачено</span>
+          </>
+        )}
+        <span className="text-[var(--muted)]/70">(тёмный = оплачено, светлый = неоплачено)</span>
       </div>
       {charges.length === 0 && (
         <p className="text-sm text-[var(--muted)]">Нет начислений для графика. Добавьте начисления выше.</p>

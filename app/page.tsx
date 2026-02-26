@@ -5,7 +5,7 @@ import DashboardChurnCharts from './components/DashboardChurnCharts'
 import DashboardSubscriptionMetrics from './components/DashboardSubscriptionMetrics'
 import DashboardWeeklyClients from './components/DashboardWeeklyClients'
 
-const iconClass = 'size-8 sm:size-9 text-blue-500 dark:text-blue-400 opacity-90 group-hover:opacity-100 transition-opacity'
+const iconClass = 'size-8 sm:size-9 text-[var(--accent)] opacity-90 group-hover:opacity-100 transition-opacity'
 
 const navCards = [
   {
@@ -78,11 +78,11 @@ export default function Home() {
                 Управляйте клиентами и подписками в одном месте.
               </p>
             </div>
-            <div className="group flex shrink-0 justify-center sm:justify-end [perspective:800px]">
+            <div className="flex shrink-0 justify-center sm:justify-end">
               <img
                 src="/pixel-hero.gif"
                 alt="Локальный бизнес и цифровое присутствие — отзывы, карты, соцсети"
-                className="h-36 w-auto rounded-xl object-contain transition-transform duration-300 ease-out sm:h-44 lg:h-52 group-hover:[transform:rotateY(6deg)_rotateX(-4deg)]"
+                className="h-36 w-auto rounded-xl object-contain sm:h-44 lg:h-52"
               />
             </div>
           </div>
@@ -102,7 +102,7 @@ export default function Home() {
               <Link
                 key={card.href}
                 href={card.href}
-                className="group flex flex-col rounded-xl border border-[var(--border)] bg-[var(--card)] p-5 shadow-sm transition-all hover:border-blue-500/50 hover:shadow-md sm:p-6"
+                className="group flex flex-col rounded-xl border border-[var(--border)] bg-[var(--card)] p-5 shadow-sm transition-colors hover:border-[var(--accent)]/50 hover:shadow-sm sm:p-6"
               >
                 {card.icon}
                 <span className="mt-2 text-lg font-medium text-[var(--foreground)] group-hover:text-[var(--accent)]">

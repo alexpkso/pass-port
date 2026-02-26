@@ -22,22 +22,30 @@ type Charge = {
   id: number
   client_id: number
   service_name: string
+  service_id?: number | null
   start_date: string | null
   end_date: string | null
   amount: number
   comment: string | null
   created_at: string
+  subscription_type?: string | null
+  status?: string | null
+  freeze_start?: string | null
+  freeze_end?: string | null
+  updated_at?: string | null
 }
 type Payment = {
   id: number
   client_id: number
   service_name: string
+  service_id?: number | null
+  charge_id?: number | null
   amount: number
   payment_date?: string
   comment: string | null
   created_at: string
 }
-type Service = { id: number; name: string; base_cost: number }
+type Service = { id: number; name: string; base_cost: number; type?: string | null; duration_days?: number | null }
 type JournalEntry = {
   id: number
   entry_date: string
@@ -58,6 +66,30 @@ const formatDate = (d: string | null) => {
   return Number.isNaN(t) ? '—' : new Date(d).toLocaleDateString('ru-RU')
 }
 const formatMoney = (n: number) => new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n) + ' ₽'
+const formatMoneyInt = (n: number) => new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(Math.round(n)) + ' ₽'
+
+const subTypeLabel = (t: string | null | undefined): { label: string; cls: string } | null => {
+  if (t === 'primary')  return { label: 'Первичная', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300' }
+  if (t === 'renewal')  return { label: 'Продление', cls: 'bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300' }
+  if (t === 'one-time') return { label: 'Разовая',   cls: 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400' }
+  return null
+}
+
+/** Добавить days дней к дате YYYY-MM-DD, вернуть YYYY-MM-DD */
+function addDays(dateStr: string, days: number): string {
+  const d = new Date(dateStr + 'T12:00:00')
+  d.setDate(d.getDate() + days)
+  return d.toISOString().slice(0, 10)
+}
+
+/** Вычисляемый статус начисления: upcoming | active | expired | paused | cancelled */
+function getChargeDisplayStatus(c: Charge, today: string): 'upcoming' | 'active' | 'expired' | 'paused' | 'cancelled' {
+  if (c.status === 'paused') return 'paused'
+  if (c.status === 'cancelled') return 'cancelled'
+  if (c.end_date && c.end_date < today) return 'expired'
+  if (c.start_date && c.start_date > today) return 'upcoming'
+  return 'active'
+}
 
 export default function ClientCardPage() {
   const params = useParams()
@@ -69,15 +101,16 @@ export default function ClientCardPage() {
   const [error, setError] = useState<string | null>(null)
   const [chargeFormError, setChargeFormError] = useState<string | null>(null)
   const [paymentFormError, setPaymentFormError] = useState<string | null>(null)
-  const [chargeForm, setChargeForm] = useState({ service_name: '', start_date: '', end_date: '', amount: '', comment: '' })
+  const [chargeForm, setChargeForm] = useState({ service_name: '', start_date: new Date().toISOString().slice(0, 10), end_date: '', amount: '', comment: '' })
   const [paymentForm, setPaymentForm] = useState(() => ({
-    service_name: '',
+    charge_id: '',
     amount: '',
     payment_date: new Date().toISOString().slice(0, 10),
     comment: '',
   }))
   const [saving, setSaving] = useState(false)
-  const [confirm, setConfirm] = useState<{ open: boolean; type: 'charge' | 'payment' | 'client'; id: number; data?: Partial<Charge> | Partial<Payment>; action?: 'edit' | 'delete' }>({ open: false, type: 'charge', id: 0 })
+  const [confirm, setConfirm] = useState<{ open: boolean; type: 'charge' | 'payment' | 'client'; id: number; data?: Partial<Charge> | Partial<Payment>; action?: 'edit' | 'delete' | 'cancel' }>({ open: false, type: 'charge', id: 0 })
+  const [dupSubConfirm, setDupSubConfirm] = useState<{ open: boolean; serviceName: string; existingCharge: Charge | null; originalStart: string; originalEnd: string; proceed: ((start: string, end: string, subscriptionType?: string) => void) | null }>({ open: false, serviceName: '', existingCharge: null, originalStart: '', originalEnd: '', proceed: null })
   const [confirmSubmitting, setConfirmSubmitting] = useState(false)
   const [editingCharge, setEditingCharge] = useState<Charge | null>(null)
   const [editingPayment, setEditingPayment] = useState<Payment | null>(null)
@@ -85,9 +118,14 @@ export default function ClientCardPage() {
   const [employees, setEmployees] = useState<Employee[]>([])
   const [clientEdit, setClientEdit] = useState({ name: '', legal_name: '', manager_id: '' })
   const [selectedServiceFilter, setSelectedServiceFilter] = useState<string>('')
+  const chargeFormRef = useRef<HTMLFormElement>(null)
   const [chargeMenuOpen, setChargeMenuOpen] = useState<{ id: number; rect: DOMRect } | null>(null)
   const [paymentMenuOpen, setPaymentMenuOpen] = useState<{ id: number; rect: DOMRect } | null>(null)
+  const [freezeDialog, setFreezeDialog] = useState<{ open: boolean; chargeId: number; charge: Charge | null; mode: 'pause' | 'resume'; date: string }>({ open: false, chargeId: 0, charge: null, mode: 'pause', date: '' })
+  const [cancelDialog, setCancelDialog] = useState<{ open: boolean; charge: Charge | null; date: string; submitting: boolean }>({ open: false, charge: null, date: '', submitting: false })
+  const [freezeSubmitting, setFreezeSubmitting] = useState(false)
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([])
+  const [card62Expanded, setCard62Expanded] = useState<string | null>(null)
   const [periodFrom, setPeriodFrom] = useState(() => {
     const d = new Date()
     return `${d.getFullYear()}-01-01`
@@ -100,7 +138,7 @@ export default function ClientCardPage() {
   const supabase = createClient()
 
   const fetchServices = async () => {
-    const { data } = await supabase.from('services').select('id, name, base_cost').order('name')
+    const { data } = await supabase.from('services').select('id, name, base_cost, type, duration_days').order('name')
     setServices((data ?? []) as Service[])
   }
 
@@ -187,6 +225,37 @@ export default function ClientCardPage() {
     setSaving(false)
   }
 
+  const executeAddCharge = async (
+    serviceName: string, startDate: string, endDate: string,
+    amount: number, comment: string, svc: Service | undefined,
+    forceSubscriptionType?: string
+  ) => {
+    setSaving(true)
+    const subscriptionType =
+      forceSubscriptionType ??
+      (svc?.type === 'one-time'
+        ? 'one-time'
+        : charges.some(c => c.service_name === serviceName && c.status !== 'cancelled')
+          ? 'renewal'
+          : 'primary')
+    const { error: e2 } = await supabase.from('charges').insert({
+      client_id: id,
+      service_name: serviceName,
+      service_id: svc?.id ?? null,
+      start_date: startDate || null,
+      end_date: endDate || null,
+      amount,
+      comment: comment || null,
+      subscription_type: subscriptionType,
+    })
+    if (e2) setChargeFormError(e2.message)
+    else {
+      setChargeForm({ service_name: '', start_date: new Date().toISOString().slice(0, 10), end_date: '', amount: '', comment: '' })
+      await Promise.all([fetchCharges(), fetchJournalEntries()])
+    }
+    setSaving(false)
+  }
+
   const handleAddCharge = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!id) return
@@ -200,30 +269,69 @@ export default function ClientCardPage() {
       setChargeFormError('Заполните обязательные поля: ' + missing.join(', '))
       return
     }
-    setChargeFormError(null)
-    setSaving(true)
-    const amount = parseFloat(chargeForm.amount.replace(',', '.'))
-    const { error: e2 } = await supabase.from('charges').insert({
-      client_id: id,
-      service_name: chargeForm.service_name.trim(),
-      start_date: chargeForm.start_date || null,
-      end_date: chargeForm.end_date || null,
-      amount,
-      comment: chargeForm.comment.trim() || null,
-    })
-    if (e2) setChargeFormError(e2.message)
-    else {
-      setChargeForm({ service_name: '', start_date: '', end_date: '', amount: '', comment: '' })
-      await Promise.all([fetchCharges(), fetchJournalEntries()])
+    if (chargeForm.start_date && chargeForm.end_date && chargeForm.start_date > chargeForm.end_date) {
+      setChargeFormError('Дата начала не может быть позже даты окончания.')
+      return
     }
-    setSaving(false)
+    setChargeFormError(null)
+    const serviceName = chargeForm.service_name.trim()
+    const amount = parseFloat(chargeForm.amount.replace(',', '.'))
+    const comment = chargeForm.comment.trim()
+    const svc = services.find(s => s.name === serviceName)
+
+    if (svc?.type === 'subscription') {
+      const sameServiceActive = charges.filter(c => c.service_name === serviceName && c.status !== 'cancelled')
+
+      if (sameServiceActive.length > 0) {
+        // Та же услуга (продление) — проверяем пересечение дат
+        const newStart = chargeForm.start_date
+        const newEnd = chargeForm.end_date
+        const hasOverlap = sameServiceActive.some(c =>
+          c.start_date && c.end_date && newStart && newEnd &&
+          newStart < c.end_date && newEnd > c.start_date
+        )
+        if (hasOverlap) {
+          const latestEnd = sameServiceActive.reduce<string | null>(
+            (m, ch) => !m || (ch.end_date && ch.end_date > m) ? (ch.end_date ?? m) : m, null
+          )
+          const nextDate = latestEnd ? addDays(latestEnd, 1) : null
+          setChargeFormError(
+            `Период пересекается с уже существующим начислением.${nextDate ? ` Ближайшая доступная дата начала: ${formatDate(nextDate)}.` : ''}`
+          )
+          return
+        }
+      }
+
+      // Проверяем наличие другой активной подписки (для любого сценария: новая или продление)
+      const otherActive = charges.find(c =>
+        c.service_name !== serviceName &&
+        c.status !== 'cancelled' &&
+        c.subscription_type !== 'one-time' &&
+        c.subscription_type != null
+      )
+      if (otherActive) {
+        setDupSubConfirm({
+          open: true,
+          serviceName: otherActive.service_name,
+          existingCharge: otherActive,
+          originalStart: chargeForm.start_date,
+          originalEnd: chargeForm.end_date,
+          proceed: (start, end, subscriptionType) => executeAddCharge(serviceName, start, end, amount, comment, svc, subscriptionType),
+        })
+        return
+      }
+    }
+
+    await executeAddCharge(serviceName, chargeForm.start_date, chargeForm.end_date, amount, comment, svc)
   }
 
   const handleAddPayment = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!id) return
+    const chargeId = paymentForm.charge_id ? Number(paymentForm.charge_id) : null
+    const linkedCharge = chargeId ? charges.find(c => c.id === chargeId) : null
     const missing: string[] = []
-    if (!paymentForm.service_name.trim()) missing.push('Услуга')
+    if (!chargeId) missing.push('Начисление')
     if (!paymentForm.payment_date) missing.push('Дата')
     if (!paymentForm.amount.trim()) missing.push('Сумма')
     else if (Number.isNaN(parseFloat(paymentForm.amount.replace(',', '.')))) missing.push('Сумма (число)')
@@ -234,9 +342,13 @@ export default function ClientCardPage() {
     setPaymentFormError(null)
     setSaving(true)
     const amount = parseFloat(paymentForm.amount.replace(',', '.'))
+    const serviceName = linkedCharge?.service_name ?? ''
+    const svcId = linkedCharge ? services.find(s => s.name === linkedCharge.service_name)?.id ?? null : null
     const { error: e2 } = await supabase.from('payments').insert({
       client_id: id,
-      service_name: paymentForm.service_name.trim(),
+      service_name: serviceName,
+      service_id: svcId,
+      charge_id: chargeId,
       amount,
       payment_date: paymentForm.payment_date,
       comment: paymentForm.comment.trim() || null,
@@ -244,7 +356,7 @@ export default function ClientCardPage() {
     if (e2) setPaymentFormError(e2.message)
     else {
       const today = new Date().toISOString().slice(0, 10)
-      setPaymentForm({ service_name: '', amount: '', payment_date: today, comment: '' })
+      setPaymentForm({ charge_id: '', amount: '', payment_date: today, comment: '' })
       await Promise.all([fetchPayments(), fetchJournalEntries()])
     }
     setSaving(false)
@@ -314,6 +426,87 @@ export default function ClientCardPage() {
     setConfirm({ open: true, type: 'payment', id: paymentId, action: 'delete' })
   }
 
+  const openFreezePause = (c: Charge) => {
+    setFreezeDialog({ open: true, chargeId: c.id, charge: c, mode: 'pause', date: new Date().toISOString().slice(0, 10) })
+    setChargeMenuOpen(null)
+  }
+  const openFreezeResume = (c: Charge) => {
+    setFreezeDialog({ open: true, chargeId: c.id, charge: c, mode: 'resume', date: new Date().toISOString().slice(0, 10) })
+    setChargeMenuOpen(null)
+  }
+  const handleFreezeSubmit = async () => {
+    if (!freezeDialog.charge || !freezeDialog.date) return
+    setFreezeSubmitting(true)
+    setError(null)
+    try {
+      const fn = freezeDialog.mode === 'pause'
+        ? 'pause_charge_with_accounting'
+        : 'resume_charge_with_accounting'
+      const paramKey = freezeDialog.mode === 'pause' ? 'p_pause_date' : 'p_resume_date'
+      const { data, error: e } = await supabase.rpc(fn, {
+        p_charge_id: freezeDialog.chargeId,
+        [paramKey]: freezeDialog.date,
+      })
+      if (e) { setError(e.message); return }
+      if (data && typeof data === 'object' && 'error' in data) { setError(String((data as Record<string,unknown>).error)); return }
+      await Promise.all([fetchCharges(), fetchJournalEntries()])
+      setFreezeDialog(f => ({ ...f, open: false }))
+    } finally {
+      setFreezeSubmitting(false)
+    }
+  }
+  const handleCancelCharge = (c: Charge) => {
+    setChargeMenuOpen(null)
+    setCancelDialog({ open: true, charge: c, date: new Date().toISOString().slice(0, 10), submitting: false })
+  }
+
+  const handleCancelSubmit = async () => {
+    if (!cancelDialog.charge || !cancelDialog.date) return
+    if (cancelDialog.charge.end_date && cancelDialog.date > cancelDialog.charge.end_date) {
+      setError('Дата отмены не может быть позже даты окончания начисления.')
+      return
+    }
+    setCancelDialog(d => ({ ...d, submitting: true }))
+    setError(null)
+    const { error: e } = await supabase.rpc('cancel_charge_with_accounting', {
+      p_charge_id: cancelDialog.charge.id,
+      p_cancel_date: cancelDialog.date,
+    })
+    if (e) {
+      setError(e.message)
+      setCancelDialog(d => ({ ...d, submitting: false }))
+      return
+    }
+    await Promise.all([fetchCharges(), fetchJournalEntries()])
+    setCancelDialog({ open: false, charge: null, date: '', submitting: false })
+  }
+  const handleRenewCharge = (c: Charge) => {
+    setChargeMenuOpen(null)
+    const svc = services.find(s => s.name === c.service_name)
+    // Ищем самую позднюю дату окончания среди всех периодов этой услуги (кроме отменённых)
+    const latestEndDate = charges
+      .filter(ch => ch.service_name === c.service_name && ch.end_date && ch.status !== 'cancelled')
+      .reduce<string | null>((latest, ch) => {
+        if (!ch.end_date) return latest
+        return !latest || ch.end_date > latest ? ch.end_date : latest
+      }, null)
+    const startDate = latestEndDate ? addDays(latestEndDate, 1) : ''
+    const dur = svc?.duration_days ?? 30
+    const endDate = startDate ? addDays(startDate, dur) : ''
+    setChargeForm({
+      service_name: c.service_name,
+      start_date: startDate,
+      end_date: endDate,
+      amount: String(c.amount),
+      comment: '',
+    })
+    setTimeout(() => {
+      if (!chargeFormRef.current) return
+      const y = chargeFormRef.current.getBoundingClientRect().top + window.scrollY - 80
+      window.scrollTo({ top: y, behavior: 'smooth' })
+    }, 50)
+  }
+
   if (loading || !client) {
     return (
       <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
@@ -338,7 +531,16 @@ export default function ClientCardPage() {
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
   const currentWeekMonday = getWeekMonday(today)
+
+  const STATUS_SORT: Record<string, number> = { upcoming: 0, active: 1, paused: 2, expired: 3, cancelled: 4 }
+  const chargesSorted = [...charges].sort((a, b) => {
+    const oa = STATUS_SORT[getChargeDisplayStatus(a, todayStr)] ?? 5
+    const ob = STATUS_SORT[getChargeDisplayStatus(b, todayStr)] ?? 5
+    if (oa !== ob) return oa - ob
+    return (b.start_date ?? '').localeCompare(a.start_date ?? '')
+  })
 
   let sumRendered = 0
   let totalWeeksContract = 0
@@ -351,13 +553,17 @@ export default function ClientCardPage() {
     const end = endStr ? new Date(endStr) : new Date(start)
     start.setHours(0, 0, 0, 0)
     end.setHours(0, 0, 0, 0)
+    // При паузе: не считаем недели после freeze_start как оказанные (услуга не оказывается)
+    const freezeStartMs = c.freeze_start ? new Date(c.freeze_start + 'T00:00:00').getTime() : null
     const mondayEnd = getWeekMonday(end)
     const mondayOfStartWeek = getWeekMonday(start)
     const firstWeekMonday = new Date(mondayOfStartWeek)
     firstWeekMonday.setDate(firstWeekMonday.getDate() + 7)
     if (firstWeekMonday.getTime() > mondayEnd.getTime()) {
       totalWeeksContract += 1
-      if (mondayEnd.getTime() <= currentWeekMonday.getTime()) {
+      const weekRendered = mondayEnd.getTime() <= currentWeekMonday.getTime() &&
+        (freezeStartMs === null || mondayEnd.getTime() < freezeStartMs)
+      if (weekRendered) {
         sumRendered += Number(c.amount)
         weeksRenderedCount += 1
       }
@@ -373,7 +579,9 @@ export default function ClientCardPage() {
     totalWeeksContract += numWeeks
     cursor.setTime(firstWeekMonday.getTime())
     while (cursor.getTime() <= mondayEnd.getTime()) {
-      if (cursor.getTime() <= currentWeekMonday.getTime()) {
+      const isPast = cursor.getTime() <= currentWeekMonday.getTime()
+      const notFrozen = freezeStartMs === null || cursor.getTime() < freezeStartMs
+      if (isPast && notFrozen) {
         sumRendered += amountPerWeek
         weeksRenderedCount += 1
       }
@@ -480,7 +688,7 @@ export default function ClientCardPage() {
         {/* Начисления */}
         <section className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
           <h2 className="text-lg font-medium text-[var(--foreground)]">Начисления</h2>
-          <form onSubmit={handleAddCharge} className="mt-4 flex flex-wrap items-end gap-3">
+          <form ref={chargeFormRef} onSubmit={handleAddCharge} className="mt-4 flex flex-wrap items-end gap-3">
             <label className="min-w-[180px] flex-1">
               <span className="mb-1 block text-xs text-[var(--muted)]">Услуга</span>
               <select
@@ -489,7 +697,11 @@ export default function ClientCardPage() {
                 onChange={e => {
                   const name = e.target.value
                   const svc = services.find(s => s.name === name)
-                  setChargeForm(f => ({ ...f, service_name: name, amount: svc ? String(svc.base_cost) : f.amount }))
+                  const amount = svc ? String(svc.base_cost) : ''
+                  const dur = svc?.duration_days
+                  const start = chargeForm.start_date
+                  const end = start && dur ? addDays(start, dur) : chargeForm.end_date
+                  setChargeForm(f => ({ ...f, service_name: name, amount, end_date: end || f.end_date }))
                 }}
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
               >
@@ -501,7 +713,18 @@ export default function ClientCardPage() {
             </label>
             <label className="min-w-[140px]">
               <span className="mb-1 block text-xs text-[var(--muted)]">Начало</span>
-              <input type="date" value={chargeForm.start_date} onChange={e => setChargeForm(f => ({ ...f, start_date: e.target.value }))} className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
+              <input
+                type="date"
+                value={chargeForm.start_date}
+                onChange={e => {
+                  const start = e.target.value
+                  const svc = services.find(s => s.name === chargeForm.service_name)
+                  const dur = svc?.duration_days
+                  const end = start && dur ? addDays(start, dur) : chargeForm.end_date
+                  setChargeForm(f => ({ ...f, start_date: start, end_date: end || f.end_date }))
+                }}
+                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
+              />
             </label>
             <label className="min-w-[140px]">
               <span className="mb-1 block text-xs text-[var(--muted)]">Конец</span>
@@ -520,14 +743,26 @@ export default function ClientCardPage() {
           {chargeFormError && (
             <p className="mt-2 text-sm text-red-600 dark:text-red-400">{chargeFormError}</p>
           )}
-          <div className="mt-4 overflow-auto max-h-64 rounded-lg border border-[var(--border)]">
+          <div className="mt-4 overflow-auto rounded-lg border border-[var(--border)]">
             <table className="min-w-full text-sm">
-              <thead className="sticky top-0 bg-[var(--muted)]/10">
-                <tr><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Услуга</th><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Начало</th><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Конец</th><th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сумма</th><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Комментарий</th><th className="px-3 py-2 w-24"></th></tr>
+              <thead className="bg-[var(--muted)]/10">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Услуга</th>
+                  <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Начало</th>
+                  <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Конец</th>
+                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сумма</th>
+                  <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Комментарий</th>
+                  <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Тип</th>
+                  <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Статус</th>
+                  <th className="px-3 py-2 w-24"></th>
+                </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border)]">
-                {charges.map(c => (
-                  <tr key={c.id}>
+                {chargesSorted.map(c => {
+                  const status = getChargeDisplayStatus(c, todayStr)
+                  const statusLabel = { upcoming: 'Запланирована', active: 'Активна', expired: 'Истекла', paused: 'На паузе', cancelled: 'Отменена' }[status]
+                  return (
+                  <tr key={c.id} className={status === 'expired' ? 'text-zinc-400 dark:text-zinc-500' : status === 'cancelled' ? 'opacity-50' : ''}>
                     {editingCharge?.id === c.id ? (
                       <>
                         <td className="px-3 py-2">
@@ -536,12 +771,14 @@ export default function ClientCardPage() {
                             {services.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
                           </select>
                         </td>
-                        <td className="px-3 py-2"><input type="date" className="rounded border border-zinc-200 px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-800" defaultValue={c.start_date || ''} id={`c-sd-${c.id}`} /></td>
+                        <td className="px-3 py-2"><input type="date" className="rounded border border-zinc-200 px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-800" defaultValue={c.start_date || ''} id={`c-sd-${c.id}`} onChange={e => { const svc = services.find(s => s.name === (document.getElementById(`c-sn-${c.id}`) as HTMLSelectElement)?.value); const dur = svc?.duration_days; if (dur && e.target.value) { const edEl = document.getElementById(`c-ed-${c.id}`) as HTMLInputElement; if (edEl) edEl.value = addDays(e.target.value, dur) } }} /></td>
                         <td className="px-3 py-2"><input type="date" className="rounded border border-zinc-200 px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-800" defaultValue={c.end_date || ''} id={`c-ed-${c.id}`} /></td>
                         <td className="px-3 py-2"><input type="text" className="w-20 rounded border border-zinc-200 px-2 py-1 text-sm text-right dark:border-zinc-600 dark:bg-zinc-800" defaultValue={c.amount} id={`c-am-${c.id}`} /></td>
                         <td className="px-3 py-2"><input className="w-full rounded border border-zinc-200 px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-800" defaultValue={c.comment || ''} id={`c-cm-${c.id}`} /></td>
+                        <td className="px-3 py-2 text-xs text-[var(--muted)]">{{ 'primary': 'Подписка / Первичная', 'renewal': 'Подписка / Продление', 'one-time': 'Разовая' }[c.subscription_type ?? ''] ?? '—'}</td>
+                        <td className="px-3 py-2 text-[var(--muted)]">—</td>
                         <td className="px-3 py-2">
-                          <button type="button" onClick={() => { const sn = (document.getElementById(`c-sn-${c.id}`) as HTMLSelectElement)?.value; const sd = (document.getElementById(`c-sd-${c.id}`) as HTMLInputElement)?.value; const ed = (document.getElementById(`c-ed-${c.id}`) as HTMLInputElement)?.value; const am = (document.getElementById(`c-am-${c.id}`) as HTMLInputElement)?.value; const cm = (document.getElementById(`c-cm-${c.id}`) as HTMLInputElement)?.value; requestChargeUpdate({ service_name: sn, start_date: sd || null, end_date: ed || null, amount: am ? parseFloat(am.replace(',', '.')) : 0, comment: cm || null }); }} className="text-blue-600 text-xs hover:underline">Сохранить</button>
+                          <button type="button" onClick={() => { const sn = (document.getElementById(`c-sn-${c.id}`) as HTMLSelectElement)?.value; const sd = (document.getElementById(`c-sd-${c.id}`) as HTMLInputElement)?.value; const ed = (document.getElementById(`c-ed-${c.id}`) as HTMLInputElement)?.value; const am = (document.getElementById(`c-am-${c.id}`) as HTMLInputElement)?.value; const cm = (document.getElementById(`c-cm-${c.id}`) as HTMLInputElement)?.value; const editSvc = services.find(s => s.name === sn); if (sd && ed && sd > ed) { setChargeFormError('Дата начала не может быть позже даты окончания.'); return; } if (sd && ed && editSvc?.type === 'subscription') { const overlap = charges.filter(ch => ch.service_name === sn && ch.id !== c.id && ch.status !== 'cancelled').some(ch => ch.start_date && ch.end_date && sd < ch.end_date && ed > ch.start_date); if (overlap) { setChargeFormError('Период пересекается с другим начислением по этой услуге.'); return; } } setChargeFormError(null); requestChargeUpdate({ service_name: sn, start_date: sd || null, end_date: ed || null, amount: am ? parseFloat(am.replace(',', '.')) : 0, comment: cm || null }); }} className="text-blue-600 text-xs hover:underline">Сохранить</button>
                           <button type="button" onClick={() => setEditingCharge(null)} className="ml-1 text-zinc-500 text-xs hover:underline">Отмена</button>
                         </td>
                       </>
@@ -553,17 +790,76 @@ export default function ClientCardPage() {
                         <td className="px-3 py-2 text-right">{formatMoney(Number(c.amount))}</td>
                         <td className="px-3 py-2 text-[var(--muted)]">{c.comment ?? '—'}</td>
                         <td className="px-3 py-2">
-                          <button type="button" onClick={(e) => { const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); setChargeMenuOpen(prev => prev?.id === c.id ? null : { id: c.id, rect }); }} className="text-blue-600 text-xs hover:underline">Изменить</button>
+                          {c.subscription_type === 'one-time' ? (
+                            <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">Разовая</span>
+                          ) : c.subscription_type === 'primary' ? (
+                            <div>
+                              <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300">Подписка</span>
+                              <div className="mt-0.5 text-xs text-blue-600 dark:text-blue-400">Первичная</div>
+                            </div>
+                          ) : c.subscription_type === 'renewal' ? (
+                            <div>
+                              <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300">Подписка</span>
+                              <div className="mt-0.5 text-xs text-green-600 dark:text-green-400">Продление</div>
+                            </div>
+                          ) : (
+                            <span className="text-[var(--muted)]">—</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-[var(--muted)]">
+                          <div>{statusLabel}</div>
+                          {c.status === 'paused' && c.freeze_start && (
+                            <div className="text-xs opacity-70">Пауза с {formatDate(c.freeze_start)}</div>
+                          )}
+                          {c.status !== 'paused' && c.freeze_start && c.freeze_end && (
+                            <div className="text-xs opacity-60">Была пауза: {formatDate(c.freeze_start)} – {formatDate(c.freeze_end)}</div>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {/* Кнопка-стрелка — открывает/закрывает меню */}
+                          <button
+                            type="button"
+                            title="Действия"
+                            onClick={(e) => { const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); setChargeMenuOpen(prev => prev?.id === c.id ? null : { id: c.id, rect }) }}
+                            className="inline-flex items-center justify-center rounded px-1.5 py-1 text-[var(--muted)] hover:bg-[var(--muted)]/20 hover:text-[var(--foreground)] transition-colors"
+                          >
+                            {chargeMenuOpen?.id === c.id
+                              ? <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M3 9l4-4 4 4"/></svg>
+                              : <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M3 5l4 4 4-4"/></svg>
+                            }
+                          </button>
                           {chargeMenuOpen?.id === c.id && typeof document !== 'undefined' && createPortal(
                             <>
                               <div className="fixed inset-0 z-40" aria-hidden onClick={() => setChargeMenuOpen(null)} />
                               <div
-                                className="fixed z-50 min-w-[120px] rounded-lg border border-[var(--border)] bg-[var(--card)] py-1 shadow-xl"
+                                className="fixed z-50 min-w-[190px] rounded-lg border border-[var(--border)] bg-[var(--card)] py-1 shadow-xl"
                                 style={{ bottom: typeof window !== 'undefined' ? window.innerHeight - chargeMenuOpen.rect.top + 8 : 0, left: chargeMenuOpen.rect.left }}
                               >
-                                <button type="button" className="block w-full px-3 py-1.5 text-left text-xs text-blue-600 hover:bg-[var(--muted)]/20" onClick={() => { setEditingCharge(c); setChargeMenuOpen(null); }}>Изменить</button>
-                                <button type="button" className="block w-full px-3 py-1.5 text-left text-xs text-red-600 hover:bg-[var(--muted)]/20" onClick={() => { requestChargeDelete(c.id); setChargeMenuOpen(null); }}>Удалить</button>
-                                <button type="button" className="block w-full px-3 py-1.5 text-left text-xs text-[var(--muted)] hover:bg-[var(--muted)]/20" onClick={() => setChargeMenuOpen(null)}>Отмена</button>
+                                {/* Блок 1: главные действия */}
+                                {(status === 'active' || status === 'expired' || status === 'paused') && c.subscription_type !== 'one-time' && (
+                                  <button type="button" className="block w-full px-3 py-2 text-left text-xs font-semibold text-green-700 hover:bg-[var(--muted)]/20 dark:text-green-400" onClick={() => handleRenewCharge(c)}>Продлить</button>
+                                )}
+                                {status === 'paused' && (
+                                  <button type="button" className="block w-full px-3 py-2 text-left text-xs font-semibold text-green-700 hover:bg-[var(--muted)]/20 dark:text-green-400" onClick={() => openFreezeResume(c)}>Возобновить</button>
+                                )}
+                                {status !== 'cancelled' && (
+                                  <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[var(--muted)]/20" onClick={() => { setEditingCharge(c); setChargeMenuOpen(null) }}>Изменить</button>
+                                )}
+
+                                {/* Разделитель + Блок 2: изменение статуса */}
+                                {(status === 'active' || status === 'upcoming' || status === 'expired' || status === 'paused') && (
+                                  <>
+                                    <div className="my-1 border-t border-[var(--border)]" />
+                                    {status === 'active' && (
+                                      <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[var(--muted)]/20" onClick={() => openFreezePause(c)}>Приостановить</button>
+                                    )}
+                                    <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[var(--muted)]/20" onClick={() => handleCancelCharge(c)}>Отменить услугу</button>
+                                  </>
+                                )}
+
+                                {/* Разделитель + Блок 3: удаление */}
+                                <div className="my-1 border-t border-[var(--border)]" />
+                                <button type="button" className="block w-full px-3 py-2 text-left text-xs text-red-600 hover:bg-red-50/60 dark:text-red-400 dark:hover:bg-red-950/20" onClick={() => { requestChargeDelete(c.id); setChargeMenuOpen(null) }}>Удалить запись</button>
                               </div>
                             </>,
                             document.body
@@ -572,7 +868,8 @@ export default function ClientCardPage() {
                       </>
                     )}
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -582,17 +879,21 @@ export default function ClientCardPage() {
         <section className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
           <h2 className="text-lg font-medium text-[var(--foreground)]">Оплаты</h2>
           <form onSubmit={handleAddPayment} className="mt-4 flex flex-wrap items-end gap-3">
-            <label className="min-w-[180px] flex-1">
-              <span className="mb-1 block text-xs text-[var(--muted)]">Услуга</span>
+            <label className="min-w-[240px] flex-1">
+              <span className="mb-1 block text-xs text-[var(--muted)]">Начисление (период)</span>
               <select
                 required
-                value={paymentForm.service_name}
-                onChange={e => setPaymentForm(f => ({ ...f, service_name: e.target.value }))}
+                value={paymentForm.charge_id}
+                onChange={e => {
+                  const cid = e.target.value
+                  const linked = cid ? charges.find(c => c.id === Number(cid)) : null
+                  setPaymentForm(f => ({ ...f, charge_id: cid, amount: linked ? String(linked.amount) : f.amount }))
+                }}
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
               >
-                <option value="">— выбрать из справочника —</option>
-                {services.map(s => (
-                  <option key={s.id} value={s.name}>{s.name}</option>
+                <option value="">— выбрать начисление —</option>
+                {charges.filter(c => c.status !== 'cancelled').map(c => (
+                  <option key={c.id} value={c.id}>{c.service_name} — {formatDate(c.start_date)} – {formatDate(c.end_date)}</option>
                 ))}
               </select>
             </label>
@@ -613,10 +914,10 @@ export default function ClientCardPage() {
           {paymentFormError && (
             <p className="mt-2 text-sm text-red-600 dark:text-red-400">{paymentFormError}</p>
           )}
-          <div className="mt-4 overflow-auto max-h-64 rounded-lg border border-[var(--border)]">
+          <div className="mt-4 overflow-auto rounded-lg border border-[var(--border)]">
             <table className="min-w-full text-sm">
-              <thead className="sticky top-0 bg-[var(--muted)]/10">
-                <tr><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Услуга</th><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Дата</th><th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сумма</th><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Комментарий</th><th className="px-3 py-2 w-24"></th></tr>
+              <thead className="bg-[var(--muted)]/10">
+                <tr><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Услуга</th><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Период</th><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Дата</th><th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сумма</th><th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Комментарий</th><th className="px-3 py-2 w-24"></th></tr>
               </thead>
               <tbody className="divide-y divide-[var(--border)]">
                 {payments.map(p => (
@@ -624,22 +925,26 @@ export default function ClientCardPage() {
                     {editingPayment?.id === p.id ? (
                       <>
                         <td className="px-3 py-2">
-                          <select className="min-w-[140px] rounded border border-zinc-200 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-800" id={`p-sn-${p.id}`} defaultValue={p.service_name}>
-                            {!services.some(s => s.name === p.service_name) && <option value={p.service_name}>{p.service_name}</option>}
-                            {services.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                          <select className="min-w-[200px] rounded border border-zinc-200 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-800" id={`p-cid-${p.id}`} defaultValue={p.charge_id ?? ''}>
+                            <option value="">— без привязки —</option>
+                            {charges.map(c => <option key={c.id} value={c.id}>{c.service_name} — {formatDate(c.start_date)} – {formatDate(c.end_date)}</option>)}
                           </select>
                         </td>
+                        <td className="px-3 py-2 text-xs text-[var(--muted)]">—</td>
                         <td className="px-3 py-2"><input type="date" className="rounded border border-zinc-200 px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-800" defaultValue={p.payment_date ?? p.created_at?.slice(0, 10) ?? ''} id={`p-dt-${p.id}`} /></td>
                         <td className="px-3 py-2"><input type="text" className="w-20 rounded border border-zinc-200 px-2 py-1 text-sm text-right dark:border-zinc-600 dark:bg-zinc-800" defaultValue={p.amount} id={`p-am-${p.id}`} /></td>
                         <td className="px-3 py-2"><input className="w-full rounded border border-zinc-200 px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-800" defaultValue={p.comment || ''} id={`p-cm-${p.id}`} /></td>
                         <td className="px-3 py-2">
-                          <button type="button" onClick={() => { const sn = (document.getElementById(`p-sn-${p.id}`) as HTMLSelectElement)?.value; const dt = (document.getElementById(`p-dt-${p.id}`) as HTMLInputElement)?.value; const am = (document.getElementById(`p-am-${p.id}`) as HTMLInputElement)?.value; const cm = (document.getElementById(`p-cm-${p.id}`) as HTMLInputElement)?.value; requestPaymentUpdate({ service_name: sn, payment_date: dt || p.payment_date || new Date().toISOString().slice(0, 10), amount: am ? parseFloat(am.replace(',', '.')) : 0, comment: cm || null }); }} className="text-blue-600 text-xs hover:underline">Сохранить</button>
+                          <button type="button" onClick={() => { const cid = (document.getElementById(`p-cid-${p.id}`) as HTMLSelectElement)?.value; const linkedCh = cid ? charges.find(c => c.id === Number(cid)) : null; const sn = linkedCh?.service_name ?? p.service_name; const svcId = linkedCh ? services.find(s => s.name === linkedCh.service_name)?.id ?? null : null; const dt = (document.getElementById(`p-dt-${p.id}`) as HTMLInputElement)?.value; const am = (document.getElementById(`p-am-${p.id}`) as HTMLInputElement)?.value; const cm = (document.getElementById(`p-cm-${p.id}`) as HTMLInputElement)?.value; requestPaymentUpdate({ service_name: sn, service_id: svcId, charge_id: cid ? Number(cid) : null, payment_date: dt || p.payment_date || new Date().toISOString().slice(0, 10), amount: am ? parseFloat(am.replace(',', '.')) : 0, comment: cm || null }); }} className="text-blue-600 text-xs hover:underline">Сохранить</button>
                           <button type="button" onClick={() => setEditingPayment(null)} className="ml-1 text-zinc-500 text-xs hover:underline">Отмена</button>
                         </td>
                       </>
                     ) : (
                       <>
                         <td className="px-3 py-2">{p.service_name}</td>
+                        <td className="px-3 py-2 text-xs text-[var(--muted)]">
+                          {(() => { const ch = p.charge_id ? charges.find(c => c.id === p.charge_id) : null; return ch ? `${formatDate(ch.start_date)} – ${formatDate(ch.end_date)}` : '—' })()}
+                        </td>
                         <td className="px-3 py-2">{formatDate(p.payment_date ?? p.created_at?.slice(0, 10) ?? null)}</td>
                         <td className="px-3 py-2 text-right">{formatMoney(Number(p.amount))}</td>
                         <td className="px-3 py-2 text-[var(--muted)]">{p.comment ?? '—'}</td>
@@ -675,21 +980,11 @@ export default function ClientCardPage() {
           <div className="mt-4 flex flex-wrap items-end gap-4">
             <label className="flex items-center gap-2">
               <span className="text-sm text-[var(--muted)]">Период с</span>
-              <input
-                type="date"
-                value={periodFrom}
-                onChange={e => setPeriodFrom(e.target.value)}
-                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
-              />
+              <input type="date" value={periodFrom} onChange={e => setPeriodFrom(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
             </label>
             <label className="flex items-center gap-2">
               <span className="text-sm text-[var(--muted)]">по</span>
-              <input
-                type="date"
-                value={periodTo}
-                onChange={e => setPeriodTo(e.target.value)}
-                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
-              />
+              <input type="date" value={periodTo} onChange={e => setPeriodTo(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
             </label>
           </div>
           <div className="mt-4 overflow-auto rounded-lg border border-[var(--border)]">
@@ -698,28 +993,65 @@ export default function ClientCardPage() {
                 <tr>
                   <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Услуга</th>
                   <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо на начало</th>
-                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Начислено</th>
-                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Оплачено</th>
+                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Дт (начислено)</th>
+                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Кт (погашено)</th>
                   <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо на конец</th>
+                  <th className="px-3 py-2 w-28"></th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[var(--border)]">
-                {cardRows.map(r => (
-                  <tr key={r.service_name}>
-                    <td className="px-3 py-2">{r.service_name}</td>
-                    <td className="px-3 py-2 text-right">{formatMoney(r.opening)}</td>
-                    <td className="px-3 py-2 text-right">{formatMoney(r.charged)}</td>
-                    <td className="px-3 py-2 text-right">{formatMoney(r.paid)}</td>
-                    <td className="px-3 py-2 text-right font-medium">{formatMoney(r.closing)}</td>
-                  </tr>
-                ))}
+              <tbody>
+                {cardRows.map(r => {
+                  const isExpanded = card62Expanded === r.service_name
+                  const detailEntries = entries62
+                    .filter(e => e.service_name === r.service_name && e.entry_date >= periodFromDate && e.entry_date <= periodToDate)
+                    .sort((a, b) => a.entry_date.localeCompare(b.entry_date))
+                  const docLabel: Record<string, string> = {
+                    charge: 'Начисление', payment: 'Оплата', weekly_recognition: 'Признание выручки',
+                    cancellation: 'Отмена', pause_reversal: 'Заморозка (сторно)', charge_resume: 'Возобновление',
+                  }
+                  return (
+                    <React.Fragment key={r.service_name}>
+                      <tr className="border-t border-[var(--border)]">
+                        <td className="px-3 py-2">{r.service_name}</td>
+                        <td className="px-3 py-2 text-right">{formatMoneyInt(r.opening)}</td>
+                        <td className="px-3 py-2 text-right">{formatMoneyInt(r.charged)}</td>
+                        <td className="px-3 py-2 text-right">{formatMoneyInt(r.paid)}</td>
+                        <td className="px-3 py-2 text-right font-medium">{formatMoneyInt(r.closing)}</td>
+                        <td className="px-3 py-2 text-right">
+                          <button type="button" onClick={() => setCard62Expanded(isExpanded ? null : r.service_name)} className="text-xs text-blue-600 hover:underline">
+                            {isExpanded ? 'Свернуть' : 'Развернуть'}
+                          </button>
+                        </td>
+                      </tr>
+                      {isExpanded && detailEntries.map(e => (
+                        <tr key={e.id} className="border-t border-[var(--border)]/50 bg-[var(--muted)]/5 text-xs">
+                          <td className="px-3 py-1.5 pl-6 text-[var(--muted)]">
+                            {formatDate(e.entry_date)}
+                            <span className="ml-2">{docLabel[e.document_type] ?? e.document_type}</span>
+                          </td>
+                          <td className="px-3 py-1.5" />
+                          <td className="px-3 py-1.5 text-right">{e.debit_account_code === '62' ? formatMoneyInt(Number(e.amount)) : ''}</td>
+                          <td className="px-3 py-1.5 text-right">{e.credit_account_code === '62' ? formatMoneyInt(Number(e.amount)) : ''}</td>
+                          <td className="px-3 py-1.5" />
+                          <td className="px-3 py-1.5" />
+                        </tr>
+                      ))}
+                      {isExpanded && detailEntries.length === 0 && (
+                        <tr className="border-t border-[var(--border)]/50 bg-[var(--muted)]/5 text-xs">
+                          <td colSpan={6} className="px-3 py-2 pl-6 text-[var(--muted)]">Нет операций за выбранный период.</td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  )
+                })}
                 {cardRows.length > 0 && (
                   <tr className="border-t-2 border-[var(--border)] bg-[var(--muted)]/5 font-medium">
                     <td className="px-3 py-2">Итого</td>
-                    <td className="px-3 py-2 text-right">{formatMoney(cardTotal.opening)}</td>
-                    <td className="px-3 py-2 text-right">{formatMoney(cardTotal.charged)}</td>
-                    <td className="px-3 py-2 text-right">{formatMoney(cardTotal.paid)}</td>
-                    <td className="px-3 py-2 text-right">{formatMoney(cardTotal.closing)}</td>
+                    <td className="px-3 py-2 text-right">{formatMoneyInt(cardTotal.opening)}</td>
+                    <td className="px-3 py-2 text-right">{formatMoneyInt(cardTotal.charged)}</td>
+                    <td className="px-3 py-2 text-right">{formatMoneyInt(cardTotal.paid)}</td>
+                    <td className="px-3 py-2 text-right">{formatMoneyInt(cardTotal.closing)}</td>
+                    <td></td>
                   </tr>
                 )}
               </tbody>
@@ -728,7 +1060,7 @@ export default function ClientCardPage() {
           {cardRows.length === 0 && (
             <p className="mt-2 text-sm text-[var(--muted)]">Нет проводок по счёту 62 за выбранный период и ранее.</p>
           )}
-          <p className="mt-3 text-xs text-[var(--muted)]">Положительное сальдо означает задолженность клиента, отрицательное — переплату.</p>
+          <p className="mt-3 text-xs text-[var(--muted)]">Положительное сальдо — задолженность клиента, отрицательное — переплата. Кт включает оплаты, отмены и сторно заморозок.</p>
         </section>
 
         {/* Карточка оказания услуг */}
@@ -807,13 +1139,179 @@ export default function ClientCardPage() {
 
       <ConfirmDialog
         open={confirm.open}
-        title="Подтверждение"
-        message={confirm.type === 'client' ? 'Точно изменить?' : confirm.action === 'delete' ? 'Точно удалить?' : 'Точно ли вы хотите изменить?'}
-        confirmLabel={confirm.action === 'delete' ? 'Да, удалить' : 'Да, изменить'}
+        title={confirm.action === 'delete' ? 'Удаление' : 'Подтверждение'}
+        message={
+          confirm.type === 'client' ? 'Сохранить изменения данных клиента?' :
+          confirm.action === 'delete' ? 'Удалить запись? Действие необратимо.' :
+          'Сохранить изменения?'
+        }
+        confirmLabel={
+          confirm.action === 'delete' ? 'Да, удалить' :
+          'Да, сохранить'
+        }
         confirmDisabled={confirmSubmitting}
         onConfirm={handleConfirmEdit}
         onCancel={() => !confirmSubmitting && setConfirm({ open: false, type: 'charge', id: 0 })}
       />
+
+      {dupSubConfirm.open && (() => {
+        const existingCharges = charges.filter(ch =>
+          ch.service_name === dupSubConfirm.existingCharge?.service_name &&
+          ch.status !== 'cancelled'
+        )
+        const latestEnd = existingCharges.reduce<string | null>((m, ch) =>
+          ch.end_date && (!m || ch.end_date > m) ? ch.end_date : m, null
+        )
+        const switchStart = latestEnd ? addDays(latestEnd, 1) : null
+        const newSvc = services.find(s => s.name === chargeForm.service_name)
+        const switchEnd = switchStart ? addDays(switchStart, newSvc?.duration_days ?? 30) : null
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+            <div className="w-full max-w-sm rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-xl">
+              <h3 className="mb-1 text-base font-bold text-[var(--foreground)]">Подписка уже есть</h3>
+              <p className="mb-5 text-sm text-[var(--muted)]">
+                У клиента уже есть активная подписка «{dupSubConfirm.serviceName}». Как добавить новую?
+              </p>
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  className="rounded-lg bg-blue-600 px-4 py-3 text-left text-sm font-semibold text-white hover:bg-blue-500 transition-colors"
+                  onClick={() => {
+                    const start = switchStart ?? dupSubConfirm.originalStart
+                    const end = switchEnd ?? dupSubConfirm.originalEnd
+                    setDupSubConfirm({ open: false, serviceName: '', existingCharge: null, originalStart: '', originalEnd: '', proceed: null })
+                    dupSubConfirm.proceed?.(start, end, 'renewal')
+                  }}
+                >
+                  Переход
+                  <span className="block text-xs font-normal opacity-80">
+                    {switchStart ? `Начало с ${formatDate(switchStart)}, с учётом окончания текущей` : 'Проверьте дату начала в форме'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-[var(--border)] px-4 py-3 text-left text-sm font-medium hover:bg-[var(--muted)]/20 transition-colors"
+                  onClick={() => {
+                    const { originalStart, originalEnd, proceed } = dupSubConfirm
+                    setDupSubConfirm({ open: false, serviceName: '', existingCharge: null, originalStart: '', originalEnd: '', proceed: null })
+                    proceed?.(originalStart, originalEnd)
+                  }}
+                >
+                  Добавить отдельно
+                  <span className="block text-xs font-normal opacity-60">Параллельная подписка с указанными датами</span>
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-[var(--border)] px-4 py-3 text-sm font-medium hover:bg-[var(--muted)]/20 transition-colors"
+                  onClick={() => setDupSubConfirm({ open: false, serviceName: '', existingCharge: null, originalStart: '', originalEnd: '', proceed: null })}
+                >
+                  Отмена
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {cancelDialog.open && cancelDialog.charge && (() => {
+        const ch = cancelDialog.charge!
+        const totalDays = ch.start_date && ch.end_date
+          ? Math.max(1, Math.round((new Date(ch.end_date + 'T12:00:00').getTime() - new Date(ch.start_date + 'T12:00:00').getTime()) / 86400000) + 1)
+          : null
+        const earnedDays = totalDays && ch.start_date && cancelDialog.date
+          ? Math.max(0, Math.min(Math.round((new Date(cancelDialog.date + 'T12:00:00').getTime() - new Date(ch.start_date + 'T12:00:00').getTime()) / 86400000) + 1, totalDays))
+          : null
+        const earned = (earnedDays !== null && totalDays) ? Math.round(ch.amount * earnedDays / totalDays * 100) / 100 : null
+        const unearned = earned !== null ? ch.amount - earned : null
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="fixed inset-0 bg-black/50" aria-hidden onClick={cancelDialog.submitting ? undefined : () => setCancelDialog(d => ({ ...d, open: false }))} />
+            <div role="dialog" aria-modal="true" className="relative z-10 w-full max-w-sm rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-xl">
+              <h3 className="text-lg font-semibold text-[var(--foreground)]">Отмена услуги</h3>
+              <p className="mt-2 text-sm text-[var(--muted-foreground)]">
+                <span className="font-medium">{ch.service_name}</span><br />
+                Период: {formatDate(ch.start_date)} — {formatDate(ch.end_date)}
+              </p>
+              <label className="mt-4 block">
+                <span className="mb-1 block text-sm text-[var(--muted)]">Дата отмены</span>
+                <input
+                  type="date"
+                  value={cancelDialog.date}
+                  min={ch.start_date || undefined}
+                  max={ch.end_date || undefined}
+                  onChange={e => setCancelDialog(d => ({ ...d, date: e.target.value }))}
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
+                />
+              </label>
+              {cancelDialog.date && earned !== null && unearned !== null && totalDays && (
+                <div className="mt-3 rounded-lg bg-[var(--muted)]/10 p-3 text-sm space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-[var(--muted)]">Оказано ({earnedDays} из {totalDays} дн.)</span>
+                    <span>{formatMoney(earned)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--muted)]">Неоказано (к возврату)</span>
+                    <span className="text-red-600">{formatMoney(unearned)}</span>
+                  </div>
+                  <div className="flex justify-between font-medium border-t border-[var(--border)] pt-1">
+                    <span>Проводка Дт 98 Кт 62</span>
+                    <span>{formatMoney(unearned)}</span>
+                  </div>
+                </div>
+              )}
+              <div className="mt-6 flex justify-end gap-3">
+                <button type="button" onClick={() => setCancelDialog(d => ({ ...d, open: false }))} disabled={cancelDialog.submitting} className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm font-medium hover:bg-[var(--border)]/50 disabled:opacity-50">Отмена</button>
+                <button type="button" onClick={handleCancelSubmit} disabled={cancelDialog.submitting || !cancelDialog.date} className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50">
+                  {cancelDialog.submitting ? 'Сохранение…' : 'Подтвердить отмену'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {freezeDialog.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/50" aria-hidden onClick={() => !confirmSubmitting && setFreezeDialog(f => ({ ...f, open: false }))} />
+          <div role="dialog" aria-modal="true" className="relative z-10 w-full max-w-sm rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-[var(--foreground)]">
+              {freezeDialog.mode === 'pause' ? 'Приостановить' : 'Возобновить'}
+            </h3>
+            <p className="mt-2 text-sm text-[var(--muted-foreground)]">
+              {freezeDialog.mode === 'pause' ? 'Укажите дату начала заморозки.' : 'Укажите дату окончания заморозки. Период услуги будет продлён на число дней заморозки.'}
+            </p>
+            <label className="mt-4 block">
+              <span className="mb-1 block text-sm text-[var(--muted)]">
+                {freezeDialog.mode === 'pause' ? 'Дата начала заморозки' : 'Дата окончания заморозки'}
+              </span>
+              <input
+                type="date"
+                value={freezeDialog.date}
+                onChange={e => setFreezeDialog(f => ({ ...f, date: e.target.value }))}
+                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
+              />
+            </label>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setFreezeDialog(f => ({ ...f, open: false }))}
+                disabled={freezeSubmitting}
+                className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm font-medium hover:bg-[var(--border)]/50 disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleFreezeSubmit}
+                disabled={freezeSubmitting || !freezeDialog.date}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                {freezeSubmitting ? 'Сохранение…' : 'Сохранить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

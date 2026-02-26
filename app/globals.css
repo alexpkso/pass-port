@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 /* Pass-Port brand: https://pass-port.ru/ */
+/* Шкала отступов: 4, 8, 12, 16, 24, 32, 48, 64 (Tailwind 1–16) — для единообразия. */
 :root {
   --background: #fdf2f8;
   --foreground: #0a0a0a;

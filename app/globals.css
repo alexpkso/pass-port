@@ -106,23 +106,25 @@ body {
   from { opacity: 1; transform: translate(-50%, -50%) scale(0.3); }
   to { opacity: 0; transform: translate(-50%, -50%) translate(-14px, -14px) scale(1.2); }
 }
-.vip-badge-enter {
-  animation: vip-appear 0.5s ease-out forwards, vip-pulse 1.2s ease-in-out 0.5s infinite;
+@layer utilities {
+  .vip-badge-enter {
+    animation: vip-appear 0.5s ease-out forwards, vip-pulse 1.2s ease-in-out 0.5s infinite;
+  }
+  .vip-fw-particle {
+    left: 50%;
+    top: 50%;
+    animation-duration: 0.8s;
+    animation-timing-function: ease-out;
+    animation-fill-mode: forwards;
+    animation-iteration-count: 3;
+    pointer-events: none;
+  }
+  .vip-fw-particle.vip-fw-0 { animation-name: vip-fw-up; }
+  .vip-fw-particle.vip-fw-1 { animation-name: vip-fw-upr; }
+  .vip-fw-particle.vip-fw-2 { animation-name: vip-fw-right; }
+  .vip-fw-particle.vip-fw-3 { animation-name: vip-fw-downr; }
+  .vip-fw-particle.vip-fw-4 { animation-name: vip-fw-down; }
+  .vip-fw-particle.vip-fw-5 { animation-name: vip-fw-downl; }
+  .vip-fw-particle.vip-fw-6 { animation-name: vip-fw-left; }
+  .vip-fw-particle.vip-fw-7 { animation-name: vip-fw-upl; }
 }
-.vip-fw-particle {
-  left: 50%;
-  top: 50%;
-  animation-duration: 0.8s;
-  animation-timing-function: ease-out;
-  animation-fill-mode: forwards;
-  animation-iteration-count: 3;
-  pointer-events: none;
-}
-.vip-fw-particle.vip-fw-0 { animation-name: vip-fw-up; }
-.vip-fw-particle.vip-fw-1 { animation-name: vip-fw-upr; }
-.vip-fw-particle.vip-fw-2 { animation-name: vip-fw-right; }
-.vip-fw-particle.vip-fw-3 { animation-name: vip-fw-downr; }
-.vip-fw-particle.vip-fw-4 { animation-name: vip-fw-down; }
-.vip-fw-particle.vip-fw-5 { animation-name: vip-fw-downl; }
-.vip-fw-particle.vip-fw-6 { animation-name: vip-fw-left; }
-.vip-fw-particle.vip-fw-7 { animation-name: vip-fw-upl; }

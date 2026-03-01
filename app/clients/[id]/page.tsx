@@ -7,6 +7,7 @@ import { createClient } from '@/utils/supabase/client'
 import Nav from '../../components/Nav'
 import Breadcrumbs from '../../components/Breadcrumbs'
 import ConfirmDialog from '../../components/ConfirmDialog'
+import ClientDashboard from './ClientDashboard'
 
 type Employee = { id: number; name: string }
 type Client = {
@@ -68,6 +69,14 @@ const formatDate = (d: string | null) => {
 const formatMoney = (n: number) => new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n) + ' ₽'
 const formatMoneyInt = (n: number) => new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(Math.round(n)) + ' ₽'
 
+const docTypeLabel = (t: string): string => {
+  if (t === 'charge') return 'Начисление'
+  if (t === 'payment') return 'Оплата'
+  if (t === 'weekly_recognition') return 'Признание выручки'
+  if (t === 'cancellation') return 'Отмена'
+  return t
+}
+
 const subTypeLabel = (t: string | null | undefined): { label: string; cls: string } | null => {
   if (t === 'primary')  return { label: 'Первичная', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300' }
   if (t === 'renewal')  return { label: 'Продление', cls: 'bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300' }
@@ -117,6 +126,7 @@ export default function ClientCardPage() {
   const [services, setServices] = useState<Service[]>([])
   const [employees, setEmployees] = useState<Employee[]>([])
   const [clientEdit, setClientEdit] = useState({ name: '', legal_name: '', manager_id: '' })
+  const [showClientEdit, setShowClientEdit] = useState(false)
   const [selectedServiceFilter, setSelectedServiceFilter] = useState<string>('')
   const chargeFormRef = useRef<HTMLFormElement>(null)
   const [chargeMenuOpen, setChargeMenuOpen] = useState<{ id: number; rect: DOMRect } | null>(null)
@@ -126,6 +136,8 @@ export default function ClientCardPage() {
   const [freezeSubmitting, setFreezeSubmitting] = useState(false)
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([])
   const [card62Expanded, setCard62Expanded] = useState<string | null>(null)
+  const [journalCollapsed, setJournalCollapsed] = useState<Set<string>>(new Set())
+  const [osvCollapsed, setOsvCollapsed] = useState<Set<string>>(new Set())
   const [periodFrom, setPeriodFrom] = useState(() => {
     const d = new Date()
     return `${d.getFullYear()}-01-01`
@@ -134,6 +146,11 @@ export default function ClientCardPage() {
     const d = new Date()
     return d.toISOString().slice(0, 10)
   })
+  const [card62PeriodFrom, setCard62PeriodFrom] = useState(() => { const d = new Date(); return `${d.getFullYear()}-01-01` })
+  const [card62PeriodTo, setCard62PeriodTo] = useState(() => new Date().toISOString().slice(0, 10))
+  const [svcStatsPeriodFrom, setSvcStatsPeriodFrom] = useState('')
+  const [svcStatsPeriodTo, setSvcStatsPeriodTo] = useState('')
+  const [keepPauseModal, setKeepPauseModal] = useState<{ open: boolean; data: Partial<Charge> | null }>({ open: false, data: null })
 
   const supabase = createClient()
 
@@ -604,60 +621,91 @@ export default function ClientCardPage() {
     }
   }
 
-  // Статистика по каждой услуге отдельно (для таблицы карточки оказания услуг)
+  // Статистика по каждой услуге:
+  //   charged/paid — из исходных данных (всё время, без фильтра периода)
+  //   rendered     — weekly_recognition из journal_entries за выбранный период
+  //   задолженность — по всему объёму оказанных услуг (не фильтруем), в неделях
+  const svcStatsFrom = svcStatsPeriodFrom || '1970-01-01'
+  const svcStatsTo = svcStatsPeriodTo || '2099-12-31'
   const allServiceStats = uniqueServices.map(svc => {
-    const svcCharges = charges.filter(c => c.service_name === svc)
+    const svcCharges = charges.filter(c => c.service_name === svc && c.status !== 'cancelled')
     const svcPayments = payments.filter(p => p.service_name === svc)
+
+    // Начислено/оплачено — итоговые за всё время
     const charged = svcCharges.reduce((s, c) => s + Number(c.amount), 0)
     const paid = svcPayments.reduce((s, p) => s + Number(p.amount), 0)
-    let rendered = 0
+
+    // Оказано — из журнала за выбранный период (period-filtered)
+    const rendered = journalEntries
+      .filter(e => e.service_name === svc && e.document_type === 'weekly_recognition'
+        && e.entry_date >= svcStatsFrom && e.entry_date <= svcStatsTo)
+      .reduce((s, e) => s + Number(e.amount), 0)
+
+    // Всего оказано за всё время (для расчёта задолженности)
+    const renderedTotal = journalEntries
+      .filter(e => e.service_name === svc && e.document_type === 'weekly_recognition')
+      .reduce((s, e) => s + Number(e.amount), 0)
+
+    // Общее кол-во недель в контракте (с учётом заморозки) — для расчёта apw
     let svcTotalWeeks = 0
-    let svcWeeksRendered = 0
     svcCharges.forEach(c => {
       const startStr = c.start_date || c.created_at
       const endStr = c.end_date || c.start_date || c.created_at
       if (!startStr) return
-      const start = new Date(startStr); start.setHours(0,0,0,0)
-      const end = endStr ? new Date(endStr) : new Date(start); end.setHours(0,0,0,0)
+      const start = new Date(startStr + 'T00:00:00'); start.setHours(0, 0, 0, 0)
+      const end = endStr ? new Date(endStr + 'T00:00:00') : new Date(start); end.setHours(0, 0, 0, 0)
       const freezeStartMs = c.freeze_start ? new Date(c.freeze_start + 'T00:00:00').getTime() : null
+      const freezeEndMs = c.freeze_end ? new Date(c.freeze_end + 'T00:00:00').getTime() : null
       const mondayEnd = getWeekMonday(end)
       const firstWeekMonday = new Date(getWeekMonday(start)); firstWeekMonday.setDate(firstWeekMonday.getDate() + 7)
       if (firstWeekMonday.getTime() > mondayEnd.getTime()) {
-        svcTotalWeeks += 1
-        const weekRendered = mondayEnd.getTime() <= currentWeekMonday.getTime() && (freezeStartMs === null || mondayEnd.getTime() < freezeStartMs)
-        if (weekRendered) { rendered += Number(c.amount); svcWeeksRendered += 1 }
+        const inFreeze = freezeStartMs !== null
+          && mondayEnd.getTime() >= freezeStartMs
+          && (freezeEndMs === null || mondayEnd.getTime() < freezeEndMs)
+        if (!inFreeze) svcTotalWeeks += 1
         return
       }
-      const cur = new Date(firstWeekMonday); let numWeeks = 0
-      while (cur.getTime() <= mondayEnd.getTime()) { numWeeks += 1; cur.setDate(cur.getDate() + 7) }
-      const apw = Number(c.amount) / numWeeks
-      svcTotalWeeks += numWeeks
-      cur.setTime(firstWeekMonday.getTime())
+      const cur = new Date(firstWeekMonday)
       while (cur.getTime() <= mondayEnd.getTime()) {
-        if (cur.getTime() <= currentWeekMonday.getTime() && (freezeStartMs === null || cur.getTime() < freezeStartMs)) { rendered += apw; svcWeeksRendered += 1 }
+        const inFreeze = freezeStartMs !== null
+          && cur.getTime() >= freezeStartMs
+          && (freezeEndMs === null || cur.getTime() < freezeEndMs)
+        if (!inFreeze) svcTotalWeeks += 1
         cur.setDate(cur.getDate() + 7)
       }
     })
+
     let svcDebtClient: number | null = null
     let svcDebtUs: number | null = null
+    let svcDebtWeeksClient = 0
+    let svcDebtWeeksUs = 0
     if (svcTotalWeeks > 0 && charged > 0) {
       const apw = charged / svcTotalWeeks
+      const weeksRenderedAll = renderedTotal / apw
       const weeksPaid = paid / apw
-      if (svcWeeksRendered > weeksPaid) { svcDebtClient = Math.round(svcWeeksRendered - weeksPaid) * apw }
-      else if (weeksPaid > svcWeeksRendered) { svcDebtUs = Math.round(weeksPaid - svcWeeksRendered) * apw }
+      const diff = weeksRenderedAll - weeksPaid
+      if (diff > 0.5) {
+        svcDebtWeeksClient = Math.round(diff)
+        svcDebtClient = svcDebtWeeksClient * apw
+      } else if (diff < -0.5) {
+        svcDebtWeeksUs = Math.round(-diff)
+        svcDebtUs = svcDebtWeeksUs * apw
+      }
     }
-    return { name: svc, charged, paid, toPay: charged - paid, rendered, debtClient: svcDebtClient, debtUs: svcDebtUs }
+    return { name: svc, charged, paid, toPay: charged - paid, rendered, debtClient: svcDebtClient, debtUs: svcDebtUs, debtWeeksClient: svcDebtWeeksClient, debtWeeksUs: svcDebtWeeksUs }
   })
 
   // Карточка счёта 62 по услугам за период
   const entries62 = journalEntries.filter(e => e.debit_account_code === '62' || e.credit_account_code === '62')
   const cardServices = Array.from(new Set(entries62.map(e => e.service_name))).sort()
+  const card62FromDate = card62PeriodFrom || '1970-01-01'
+  const card62ToDate = card62PeriodTo || '2099-12-31'
   const periodFromDate = periodFrom || '1970-01-01'
   const periodToDate = periodTo || '2099-12-31'
   const cardRows = cardServices.map(service_name => {
     const forService = (ee: typeof entries62) => ee.filter(e => e.service_name === service_name)
-    const beforePeriod = forService(entries62).filter(e => e.entry_date < periodFromDate)
-    const inPeriod = forService(entries62).filter(e => e.entry_date >= periodFromDate && e.entry_date <= periodToDate)
+    const beforePeriod = forService(entries62).filter(e => e.entry_date < card62FromDate)
+    const inPeriod = forService(entries62).filter(e => e.entry_date >= card62FromDate && e.entry_date <= card62ToDate)
     const opening = beforePeriod.reduce((s, e) => s + (e.debit_account_code === '62' ? Number(e.amount) : -Number(e.amount)), 0)
     const charged = inPeriod.filter(e => e.debit_account_code === '62').reduce((s, e) => s + Number(e.amount), 0)
     const paid = inPeriod.filter(e => e.credit_account_code === '62').reduce((s, e) => s + Number(e.amount), 0)
@@ -676,89 +724,127 @@ export default function ClientCardPage() {
     '90': 'Продажи',
     '51': 'Расчётные счета',
   }
-  // Active accounts: closing balance = Дт - Кт; passive: Кт - Дт
-  const activeAccounts = new Set(['62', '51'])
-  const osvSvcMap = new Map<string, Map<string, { dt: number; kt: number }>>()
+  // ОСВ: разделяем проводки на «до периода» (сальдо нач.) и «внутри периода» (обороты)
+  type AccEntry = { dt: number; kt: number }
+  const addToMap = (map: Map<string, Map<string, AccEntry>>, svc: string, acc: string, side: 'dt' | 'kt', amount: number) => {
+    if (!map.has(svc)) map.set(svc, new Map())
+    const m = map.get(svc)!
+    if (!m.has(acc)) m.set(acc, { dt: 0, kt: 0 })
+    m.get(acc)![side] += amount
+  }
+  const osvOpenMap = new Map<string, Map<string, AccEntry>>()  // до periodFromDate
+  const osvPeriodMap = new Map<string, Map<string, AccEntry>>() // в период
   journalEntries.forEach(e => {
     const svc = e.service_name || '(без услуги)'
-    if (!osvSvcMap.has(svc)) osvSvcMap.set(svc, new Map())
-    const m = osvSvcMap.get(svc)!
-    const dtAcc = e.debit_account_code
-    if (!m.has(dtAcc)) m.set(dtAcc, { dt: 0, kt: 0 })
-    m.get(dtAcc)!.dt += Number(e.amount)
-    const ktAcc = e.credit_account_code
-    if (!m.has(ktAcc)) m.set(ktAcc, { dt: 0, kt: 0 })
-    m.get(ktAcc)!.kt += Number(e.amount)
+    const amt = Number(e.amount)
+    const target = e.entry_date < periodFromDate ? osvOpenMap : (e.entry_date <= periodToDate ? osvPeriodMap : null)
+    if (!target) return
+    addToMap(target, svc, e.debit_account_code, 'dt', amt)
+    addToMap(target, svc, e.credit_account_code, 'kt', amt)
   })
-  const osvData = Array.from(osvSvcMap.entries())
-    .map(([name, accMap]) => {
-      const rows = Array.from(accMap.entries())
-        .map(([account, v]) => ({ account, dt: v.dt, kt: v.kt }))
-        .sort((a, b) => a.account.localeCompare(b.account))
-      const totalDt = rows.reduce((s, r) => s + r.dt, 0)
-      const totalKt = rows.reduce((s, r) => s + r.kt, 0)
-      return { name, rows, totalDt, totalKt }
+  const allOsvSvcs = Array.from(new Set([...osvOpenMap.keys(), ...osvPeriodMap.keys()])).sort()
+  const osvData = allOsvSvcs.map(name => {
+    const openMap  = osvOpenMap.get(name)  ?? new Map<string, AccEntry>()
+    const inMap    = osvPeriodMap.get(name) ?? new Map<string, AccEntry>()
+    const allAccs  = Array.from(new Set([...openMap.keys(), ...inMap.keys()])).sort()
+    const rows = allAccs.map(account => {
+      const o = openMap.get(account)  ?? { dt: 0, kt: 0 }
+      const p = inMap.get(account)    ?? { dt: 0, kt: 0 }
+      // сальдо нач: dt - kt (положительное = Дт, отрицательное = Кт)
+      const openingNet = o.dt - o.kt
+      const periodDt   = p.dt
+      const periodKt   = p.kt
+      // сальдо кон = сальдо нач + (оборот Дт − оборот Кт)
+      const closingNet = openingNet + periodDt - periodKt
+      return { account, openingNet, periodDt, periodKt, closingNet }
     })
-    .sort((a, b) => a.name.localeCompare(b.name))
-  const osvClosing = (acc: string, dt: number, kt: number) =>
-    activeAccounts.has(acc) ? dt - kt : kt - dt
+    const totalOpeningNet = rows.reduce((s, r) => s + r.openingNet, 0)
+    const totalPeriodDt   = rows.reduce((s, r) => s + r.periodDt, 0)
+    const totalPeriodKt   = rows.reduce((s, r) => s + r.periodKt, 0)
+    const totalClosingNet = rows.reduce((s, r) => s + r.closingNet, 0)
+    return { name, rows, totalOpeningNet, totalPeriodDt, totalPeriodKt, totalClosingNet }
+  })
+  // Сальдо конечное: Дт = max(0, dt-kt), Кт = max(0, kt-dt) — универсально для любого счёта
+  const osvNetDt = (dt: number, kt: number) => dt > kt ? dt - kt : 0
+  const osvNetKt = (dt: number, kt: number) => kt > dt ? kt - dt : 0
 
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
       <Nav />
       <div className="mx-auto max-w-[84rem] px-4 py-8 sm:px-6">
         <Breadcrumbs items={[{ href: '/', label: 'Главная' }, { href: '/clients', label: 'Клиенты' }, { href: `/clients/${id}`, label: client.name }]} />
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">{client.name}</h1>
 
-        {/* Информация о клиенте */}
-        <section className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-          <h2 className="text-lg font-medium text-[var(--foreground)]">Данные клиента</h2>
-          <div className="mt-4 flex flex-wrap items-end gap-4">
-            <label className="min-w-[200px] flex-1">
-              <span className="mb-1 block text-sm text-[var(--muted)]">Название клиента</span>
-              <div className="flex items-center gap-2">
-                <input
-                  value={clientEdit.name}
-                  onChange={e => setClientEdit(f => ({ ...f, name: e.target.value }))}
-                  placeholder="Название"
-                  className="flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
-                />
-                <button type="button" onClick={() => setConfirm({ open: true, type: 'client', id: 0 })} className="shrink-0 text-sm text-blue-600 hover:underline">Изменить</button>
-              </div>
-            </label>
-            <label className="min-w-[200px] flex-1">
-              <span className="mb-1 block text-sm text-[var(--muted)]">Юридическое название</span>
-              <input
-                value={clientEdit.legal_name}
-                onChange={e => setClientEdit(f => ({ ...f, legal_name: e.target.value }))}
-                placeholder="—"
-                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
-              />
-            </label>
-            <label className="min-w-[180px]">
-              <span className="mb-1 block text-sm text-[var(--muted)]">Менеджер</span>
-              <select
-                value={clientEdit.manager_id}
-                onChange={e => setClientEdit(f => ({ ...f, manager_id: e.target.value }))}
-                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
-              >
-                <option value="">— не выбран</option>
-                {employees.map(emp => (
-                  <option key={emp.id} value={emp.id}>{emp.name}</option>
-                ))}
-              </select>
-            </label>
-            <span className="text-sm text-[var(--muted)]">Создан: {formatDate(client.created_at)}</span>
-            <button
-              type="button"
-              onClick={handleSaveClient}
-              disabled={saving || (clientEdit.name === (client.name ?? '') && clientEdit.legal_name === (client.legal_name ?? '') && clientEdit.manager_id === (client.manager_id != null ? String(client.manager_id) : ''))}
-              className="h-[42px] shrink-0 rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-            >
-              Сохранить
-            </button>
-          </div>
-        </section>
+        <div className="mt-4">
+          <ClientDashboard
+            clientName={client.name}
+            legalName={client.legal_name ?? null}
+            managerName={
+              client.employees
+                ? Array.isArray(client.employees)
+                  ? (client.employees[0]?.name ?? null)
+                  : client.employees.name
+                : null
+            }
+            createdAt={client.created_at}
+            charges={charges}
+            payments={payments}
+            onEditClick={() => setShowClientEdit(v => !v)}
+            editFormSlot={showClientEdit ? (
+              <section className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-5 shadow-sm">
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="min-w-[180px] flex-1">
+                    <span className="mb-1 block text-xs text-[var(--muted)]">Название</span>
+                    <input
+                      value={clientEdit.name}
+                      onChange={e => setClientEdit(f => ({ ...f, name: e.target.value }))}
+                      placeholder="Название"
+                      className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
+                    />
+                  </label>
+                  <label className="min-w-[180px] flex-1">
+                    <span className="mb-1 block text-xs text-[var(--muted)]">Юридическое название</span>
+                    <input
+                      value={clientEdit.legal_name}
+                      onChange={e => setClientEdit(f => ({ ...f, legal_name: e.target.value }))}
+                      placeholder="—"
+                      className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
+                    />
+                  </label>
+                  <label className="min-w-[150px]">
+                    <span className="mb-1 block text-xs text-[var(--muted)]">Менеджер</span>
+                    <select
+                      value={clientEdit.manager_id}
+                      onChange={e => setClientEdit(f => ({ ...f, manager_id: e.target.value }))}
+                      className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
+                    >
+                      <option value="">— не выбран</option>
+                      {employees.map(emp => (
+                        <option key={emp.id} value={emp.id}>{emp.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setConfirm({ open: true, type: 'client', id: 0 })}
+                      disabled={saving || (clientEdit.name === (client.name ?? '') && clientEdit.legal_name === (client.legal_name ?? '') && clientEdit.manager_id === (client.manager_id != null ? String(client.manager_id) : ''))}
+                      className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-40"
+                    >
+                      Сохранить
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowClientEdit(false)}
+                      className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                </div>
+              </section>
+            ) : undefined}
+          />
+        </div>
 
         {error && (
           <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300">{error}</div>
@@ -857,7 +943,7 @@ export default function ClientCardPage() {
                         <td className="px-3 py-2 text-xs text-[var(--muted)]">{{ 'primary': 'Подписка / Первичная', 'renewal': 'Подписка / Продление', 'one-time': 'Разовая' }[c.subscription_type ?? ''] ?? '—'}</td>
                         <td className="px-3 py-2 text-[var(--muted)]">—</td>
                         <td className="px-3 py-2">
-                          <button type="button" onClick={() => { const sn = (document.getElementById(`c-sn-${c.id}`) as HTMLSelectElement)?.value; const sd = (document.getElementById(`c-sd-${c.id}`) as HTMLInputElement)?.value; const ed = (document.getElementById(`c-ed-${c.id}`) as HTMLInputElement)?.value; const am = (document.getElementById(`c-am-${c.id}`) as HTMLInputElement)?.value; const cm = (document.getElementById(`c-cm-${c.id}`) as HTMLInputElement)?.value; const editSvc = services.find(s => s.name === sn); if (sd && ed && sd > ed) { setChargeFormError('Дата начала не может быть позже даты окончания.'); return; } if (sd && ed && editSvc?.type === 'subscription') { const overlap = charges.filter(ch => ch.service_name === sn && ch.id !== c.id && ch.status !== 'cancelled').some(ch => ch.start_date && ch.end_date && sd < ch.end_date && ed > ch.start_date); if (overlap) { setChargeFormError('Период пересекается с другим начислением по этой услуге.'); return; } } setChargeFormError(null); requestChargeUpdate({ service_name: sn, start_date: sd || null, end_date: ed || null, amount: am ? parseFloat(am.replace(',', '.')) : 0, comment: cm || null }); }} className="text-blue-600 text-xs hover:underline">Сохранить</button>
+                          <button type="button" onClick={() => { const sn = (document.getElementById(`c-sn-${c.id}`) as HTMLSelectElement)?.value; const sd = (document.getElementById(`c-sd-${c.id}`) as HTMLInputElement)?.value; const ed = (document.getElementById(`c-ed-${c.id}`) as HTMLInputElement)?.value; const am = (document.getElementById(`c-am-${c.id}`) as HTMLInputElement)?.value; const cm = (document.getElementById(`c-cm-${c.id}`) as HTMLInputElement)?.value; const editSvc = services.find(s => s.name === sn); if (sd && ed && sd > ed) { setChargeFormError('Дата начала не может быть позже даты окончания.'); return; } if (sd && ed && editSvc?.type === 'subscription') { const overlap = charges.filter(ch => ch.service_name === sn && ch.id !== c.id && ch.status !== 'cancelled').some(ch => ch.start_date && ch.end_date && sd < ch.end_date && ed > ch.start_date); if (overlap) { setChargeFormError('Период пересекается с другим начислением по этой услуге.'); return; } } setChargeFormError(null); const updateData = { service_name: sn, start_date: sd || null, end_date: ed || null, amount: am ? parseFloat(am.replace(',', '.')) : 0, comment: cm || null }; if (editingCharge?.freeze_start) { setKeepPauseModal({ open: true, data: updateData }) } else { requestChargeUpdate(updateData) } }} className="text-blue-600 text-xs hover:underline">Сохранить</button>
                           <button type="button" onClick={() => setEditingCharge(null)} className="ml-1 text-zinc-500 text-xs hover:underline">Отмена</button>
                         </td>
                       </>
@@ -1027,18 +1113,28 @@ export default function ClientCardPage() {
                         <td className="px-3 py-2">{formatDate(p.payment_date ?? p.created_at?.slice(0, 10) ?? null)}</td>
                         <td className="px-3 py-2 text-right">{formatMoney(Number(p.amount))}</td>
                         <td className="px-3 py-2 text-[var(--muted)]">{p.comment ?? '—'}</td>
-                        <td className="px-3 py-2">
-                          <button type="button" onClick={(e) => { const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); setPaymentMenuOpen(prev => prev?.id === p.id ? null : { id: p.id, rect }); }} className="text-blue-600 text-xs hover:underline">Изменить</button>
+                        <td className="px-3 py-2 text-right">
+                          <button
+                            type="button"
+                            title="Действия"
+                            onClick={(e) => { const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); setPaymentMenuOpen(prev => prev?.id === p.id ? null : { id: p.id, rect }) }}
+                            className="inline-flex items-center justify-center rounded px-1.5 py-1 text-[var(--muted)] hover:bg-[var(--muted)]/20 hover:text-[var(--foreground)] transition-colors"
+                          >
+                            {paymentMenuOpen?.id === p.id
+                              ? <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M3 9l4-4 4 4"/></svg>
+                              : <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M3 5l4 4 4-4"/></svg>
+                            }
+                          </button>
                           {paymentMenuOpen?.id === p.id && typeof document !== 'undefined' && createPortal(
                             <>
                               <div className="fixed inset-0 z-40" aria-hidden onClick={() => setPaymentMenuOpen(null)} />
                               <div
-                                className="fixed z-50 min-w-[120px] rounded-lg border border-[var(--border)] bg-[var(--card)] py-1 shadow-xl"
+                                className="fixed z-50 min-w-[190px] rounded-lg border border-[var(--border)] bg-[var(--card)] py-1 shadow-xl"
                                 style={{ bottom: typeof window !== 'undefined' ? window.innerHeight - paymentMenuOpen.rect.top + 8 : 0, left: paymentMenuOpen.rect.left }}
                               >
-                                <button type="button" className="block w-full px-3 py-1.5 text-left text-xs text-blue-600 hover:bg-[var(--muted)]/20" onClick={() => { setEditingPayment(p); setPaymentMenuOpen(null); }}>Изменить</button>
-                                <button type="button" className="block w-full px-3 py-1.5 text-left text-xs text-red-600 hover:bg-[var(--muted)]/20" onClick={() => { requestPaymentDelete(p.id); setPaymentMenuOpen(null); }}>Удалить</button>
-                                <button type="button" className="block w-full px-3 py-1.5 text-left text-xs text-[var(--muted)] hover:bg-[var(--muted)]/20" onClick={() => setPaymentMenuOpen(null)}>Отмена</button>
+                                <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[var(--muted)]/20" onClick={() => { setEditingPayment(p); setPaymentMenuOpen(null); }}>Изменить</button>
+                                <div className="my-1 border-t border-[var(--border)]" />
+                                <button type="button" className="block w-full px-3 py-2 text-left text-xs text-red-600 hover:bg-red-50/60 dark:text-red-400 dark:hover:bg-red-950/20" onClick={() => { requestPaymentDelete(p.id); setPaymentMenuOpen(null); }}>Удалить запись</button>
                               </div>
                             </>,
                             document.body
@@ -1055,26 +1151,30 @@ export default function ClientCardPage() {
 
         {/* Карточка счёта 62 (расчёты с клиентом) в разрезе услуг */}
         <section className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-          <h2 className="text-lg font-medium text-[var(--foreground)]">Карточка расчётов с клиентом (счёт 62)</h2>
-          <div className="mt-4 flex flex-wrap items-end gap-4">
-            <label className="flex items-center gap-2">
-              <span className="text-sm text-[var(--muted)]">Период с</span>
-              <input type="date" value={periodFrom} onChange={e => setPeriodFrom(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
-            </label>
-            <label className="flex items-center gap-2">
-              <span className="text-sm text-[var(--muted)]">по</span>
-              <input type="date" value={periodTo} onChange={e => setPeriodTo(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
-            </label>
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
+            <h2 className="text-lg font-medium text-[var(--foreground)]">Карточка расчётов с клиентом (счёт 62)</h2>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2">
+                <span className="text-sm text-[var(--muted)]">с</span>
+                <input type="date" value={card62PeriodFrom} onChange={e => setCard62PeriodFrom(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
+              </label>
+              <label className="flex items-center gap-2">
+                <span className="text-sm text-[var(--muted)]">по</span>
+                <input type="date" value={card62PeriodTo} onChange={e => setCard62PeriodTo(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
+              </label>
+            </div>
           </div>
-          <div className="mt-4 overflow-auto rounded-lg border border-[var(--border)]">
+          <div className="overflow-auto rounded-lg border border-[var(--border)]">
             <table className="min-w-full text-sm">
               <thead className="bg-[var(--muted)]/10">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Услуга</th>
-                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо на начало</th>
+                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо нач. Дт</th>
+                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо нач. Кт</th>
                   <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Дт (начислено)</th>
                   <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Кт (погашено)</th>
-                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо на конец</th>
+                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо кон. Дт</th>
+                  <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо кон. Кт</th>
                   <th className="px-3 py-2 w-28"></th>
                 </tr>
               </thead>
@@ -1082,20 +1182,22 @@ export default function ClientCardPage() {
                 {cardRows.map(r => {
                   const isExpanded = card62Expanded === r.service_name
                   const detailEntries = entries62
-                    .filter(e => e.service_name === r.service_name && e.entry_date >= periodFromDate && e.entry_date <= periodToDate)
+                    .filter(e => e.service_name === r.service_name && e.entry_date >= card62FromDate && e.entry_date <= card62ToDate)
                     .sort((a, b) => a.entry_date.localeCompare(b.entry_date))
                   const docLabel: Record<string, string> = {
                     charge: 'Начисление', payment: 'Оплата', weekly_recognition: 'Признание выручки',
-                    cancellation: 'Отмена', pause_reversal: 'Заморозка (сторно)', charge_resume: 'Возобновление',
+                    cancellation: 'Отмена',
                   }
                   return (
                     <React.Fragment key={r.service_name}>
                       <tr className="border-t border-[var(--border)]">
                         <td className="px-3 py-2">{r.service_name}</td>
-                        <td className="px-3 py-2 text-right">{formatMoneyInt(r.opening)}</td>
+                        <td className="px-3 py-2 text-right">{r.opening > 0 ? formatMoneyInt(r.opening) : '—'}</td>
+                        <td className="px-3 py-2 text-right">{r.opening < 0 ? formatMoneyInt(-r.opening) : '—'}</td>
                         <td className="px-3 py-2 text-right">{formatMoneyInt(r.charged)}</td>
                         <td className="px-3 py-2 text-right">{formatMoneyInt(r.paid)}</td>
-                        <td className="px-3 py-2 text-right font-medium">{formatMoneyInt(r.closing)}</td>
+                        <td className="px-3 py-2 text-right font-medium">{r.closing > 0 ? formatMoneyInt(r.closing) : '—'}</td>
+                        <td className="px-3 py-2 text-right font-medium">{r.closing < 0 ? formatMoneyInt(-r.closing) : '—'}</td>
                         <td className="px-3 py-2 text-right">
                           <button type="button" onClick={() => setCard62Expanded(isExpanded ? null : r.service_name)} className="text-xs text-blue-600 hover:underline">
                             {isExpanded ? 'Свернуть' : 'Развернуть'}
@@ -1109,15 +1211,17 @@ export default function ClientCardPage() {
                             <span className="ml-2">{docLabel[e.document_type] ?? e.document_type}</span>
                           </td>
                           <td className="px-3 py-1.5" />
+                          <td className="px-3 py-1.5" />
                           <td className="px-3 py-1.5 text-right">{e.debit_account_code === '62' ? formatMoneyInt(Number(e.amount)) : ''}</td>
                           <td className="px-3 py-1.5 text-right">{e.credit_account_code === '62' ? formatMoneyInt(Number(e.amount)) : ''}</td>
+                          <td className="px-3 py-1.5" />
                           <td className="px-3 py-1.5" />
                           <td className="px-3 py-1.5" />
                         </tr>
                       ))}
                       {isExpanded && detailEntries.length === 0 && (
                         <tr className="border-t border-[var(--border)]/50 bg-[var(--muted)]/5 text-xs">
-                          <td colSpan={6} className="px-3 py-2 pl-6 text-[var(--muted)]">Нет операций за выбранный период.</td>
+                          <td colSpan={8} className="px-3 py-2 pl-6 text-[var(--muted)]">Нет операций за выбранный период.</td>
                         </tr>
                       )}
                     </React.Fragment>
@@ -1126,10 +1230,12 @@ export default function ClientCardPage() {
                 {cardRows.length > 0 && (
                   <tr className="border-t-2 border-[var(--border)] bg-[var(--muted)]/5 font-medium">
                     <td className="px-3 py-2">Итого</td>
-                    <td className="px-3 py-2 text-right">{formatMoneyInt(cardTotal.opening)}</td>
+                    <td className="px-3 py-2 text-right">{cardTotal.opening > 0 ? formatMoneyInt(cardTotal.opening) : '—'}</td>
+                    <td className="px-3 py-2 text-right">{cardTotal.opening < 0 ? formatMoneyInt(-cardTotal.opening) : '—'}</td>
                     <td className="px-3 py-2 text-right">{formatMoneyInt(cardTotal.charged)}</td>
                     <td className="px-3 py-2 text-right">{formatMoneyInt(cardTotal.paid)}</td>
-                    <td className="px-3 py-2 text-right">{formatMoneyInt(cardTotal.closing)}</td>
+                    <td className="px-3 py-2 text-right">{cardTotal.closing > 0 ? formatMoneyInt(cardTotal.closing) : '—'}</td>
+                    <td className="px-3 py-2 text-right">{cardTotal.closing < 0 ? formatMoneyInt(-cardTotal.closing) : '—'}</td>
                     <td></td>
                   </tr>
                 )}
@@ -1144,7 +1250,19 @@ export default function ClientCardPage() {
 
         {/* Карточка оказания услуг */}
         <section className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-          <h2 className="text-lg font-medium text-[var(--foreground)]">Карточка оказания услуг</h2>
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
+            <h2 className="text-lg font-medium text-[var(--foreground)]">Карточка оказания услуг</h2>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2">
+                <span className="text-sm text-[var(--muted)]">с</span>
+                <input type="date" value={svcStatsPeriodFrom} onChange={e => setSvcStatsPeriodFrom(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
+              </label>
+              <label className="flex items-center gap-2">
+                <span className="text-sm text-[var(--muted)]">по</span>
+                <input type="date" value={svcStatsPeriodTo} onChange={e => setSvcStatsPeriodTo(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
+              </label>
+            </div>
+          </div>
           {uniqueServices.length === 0 ? (
             <p className="mt-4 text-sm text-[var(--muted)]">Нет начислений.</p>
           ) : (
@@ -1170,10 +1288,10 @@ export default function ClientCardPage() {
                       <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Math.round(s.rendered))}</td>
                       <td className="px-3 py-2 text-sm">
                         {s.debtClient != null && s.debtClient > 0
-                          ? <span className="text-red-600 dark:text-red-400">Клиент: {formatMoney(Math.round(s.debtClient))}</span>
+                          ? <span className="text-red-600 dark:text-red-400">Клиент: {formatMoney(Math.round(s.debtClient))}{s.debtWeeksClient > 0 ? <span className="ml-1 text-xs opacity-70">({s.debtWeeksClient} нед.)</span> : null}</span>
                           : s.debtUs != null && s.debtUs > 0
-                            ? <span className="text-green-600 dark:text-green-400">Мы: {formatMoney(Math.round(s.debtUs))}</span>
-                            : <span className="text-[var(--muted)]">—</span>}
+                            ? <span className="text-green-600 dark:text-green-400">Мы: {formatMoney(Math.round(s.debtUs))}{s.debtWeeksUs > 0 ? <span className="ml-1 text-xs opacity-70">({s.debtWeeksUs} нед.)</span> : null}</span>
+                            : <span className="text-emerald-600 dark:text-emerald-400">✓ Закрыто</span>}
                       </td>
                     </tr>
                   ))}
@@ -1203,91 +1321,189 @@ export default function ClientCardPage() {
               <h2 className="text-lg font-medium text-[var(--foreground)]">Дашборд начислений</h2>
               <p className="mt-1 text-sm text-[var(--muted)]">Всего начислено: {formatMoney(dashCharged)} · Оплачено: {formatMoney(dashPaid)} · Доля оплаты: {dashCharged ? Math.round((dashPaid / dashCharged) * 100) : 0}%</p>
               <div className="mt-6">
-                <ClientChargesChart charges={charges} payments={payments} />
+                <WeeklyPaymentMatrix charges={charges} payments={payments} journalEntries={journalEntries} />
               </div>
             </section>
           )
         })()}
 
-        {/* Оборотно-сальдовая ведомость по счетам в разрезе услуг */}
-        {osvData.length > 0 && (
+        {/* Справочно: бухгалтерский учёт */}
+        {journalEntries.length > 0 && (
           <section className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-            <h2 className="mb-1 text-lg font-medium text-[var(--foreground)]">Оборотно-сальдовая ведомость</h2>
-            <p className="mb-4 text-sm text-[var(--muted)]">По счетам бухгалтерского учёта в разрезе услуг. Сальдо начальное = 0 (все операции за весь период).</p>
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+              <h2 className="text-lg font-semibold text-[var(--foreground)]">Справочно (бухгалтерский учёт)</h2>
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-2">
+                  <span className="text-sm text-[var(--muted)]">с</span>
+                  <input type="date" value={periodFrom} onChange={e => setPeriodFrom(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
+                </label>
+                <label className="flex items-center gap-2">
+                  <span className="text-sm text-[var(--muted)]">по</span>
+                  <input type="date" value={periodTo} onChange={e => setPeriodTo(e.target.value)} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800" />
+                </label>
+              </div>
+            </div>
+
+            {/* Оборотно-сальдовая ведомость */}
+            {osvData.length > 0 && (<div className="mb-8">
+            <h3 className="mb-3 text-base font-medium text-[var(--foreground)]">Оборотно-сальдовая ведомость</h3>
             <div className="overflow-auto rounded-lg border border-[var(--border)]">
               <table className="min-w-full text-sm">
                 <thead className="bg-[var(--muted)]/10">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Услуга / Счёт</th>
-                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо нач.</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо нач. Дт</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо нач. Кт</th>
                     <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Оборот Дт</th>
                     <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Оборот Кт</th>
-                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо конечн.</th>
-                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Дт/Кт</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо кон. Дт</th>
+                    <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сальдо кон. Кт</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {osvData.map((svc, si) => (
-                    <>
-                      {/* Заголовок услуги */}
-                      <tr key={`svc-${si}`} className="bg-[var(--muted)]/5 border-t border-[var(--border)]">
-                        <td colSpan={6} className="px-3 py-2 font-semibold text-[var(--foreground)]">{svc.name}</td>
+                  {osvData.map((svc, si) => {
+                    const isOsvCollapsed = osvCollapsed.has(svc.name)
+                    return (
+                    <React.Fragment key={`svc-${si}`}>
+                      {/* Заголовок услуги — кликабельный */}
+                      <tr
+                        className="bg-[var(--muted)]/5 border-t border-[var(--border)] cursor-pointer select-none hover:bg-[var(--muted)]/10 transition-colors"
+                        onClick={() => setOsvCollapsed(prev => { const next = new Set(prev); if (next.has(svc.name)) next.delete(svc.name); else next.add(svc.name); return next })}
+                      >
+                        <td colSpan={7} className="px-3 py-2 font-semibold text-[var(--foreground)]">
+                          <span className="mr-2 inline-block w-3 text-[var(--muted)] text-xs">{isOsvCollapsed ? '▶' : '▼'}</span>
+                          {svc.name}
+                          {isOsvCollapsed && (
+                            <span className="ml-3 text-xs font-normal text-[var(--muted)]">{svc.rows.length} счетов · сальдо кон.: {svc.totalClosingNet > 0 ? 'Дт ' + formatMoneyInt(svc.totalClosingNet) : svc.totalClosingNet < 0 ? 'Кт ' + formatMoneyInt(-svc.totalClosingNet) : '0'}</span>
+                          )}
+                        </td>
                       </tr>
                       {/* Строки по счетам */}
-                      {svc.rows.map(row => {
-                        const closing = osvClosing(row.account, row.dt, row.kt)
-                        const isDebitBalance = closing >= 0
-                        return (
-                          <tr key={`${si}-${row.account}`} className="border-t border-[var(--border)]/50 hover:bg-[var(--muted)]/5">
-                            <td className="px-3 py-2 pl-6 text-[var(--muted)]">
-                              <span className="font-medium text-[var(--foreground)]">{row.account}</span>
-                              {accountName[row.account] ? <span className="ml-2 text-xs text-[var(--muted)]">{accountName[row.account]}</span> : null}
-                            </td>
-                            <td className="px-3 py-2 text-right text-[var(--muted)]">—</td>
-                            <td className="px-3 py-2 text-right">{row.dt > 0 ? formatMoneyInt(row.dt) : '—'}</td>
-                            <td className="px-3 py-2 text-right">{row.kt > 0 ? formatMoneyInt(row.kt) : '—'}</td>
-                            <td className="px-3 py-2 text-right font-medium">{closing !== 0 ? formatMoneyInt(Math.abs(closing)) : '—'}</td>
-                            <td className={`px-3 py-2 text-right text-xs font-semibold ${isDebitBalance ? 'text-blue-600 dark:text-blue-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                              {closing !== 0 ? (isDebitBalance ? 'Дт' : 'Кт') : '—'}
-                            </td>
-                          </tr>
-                        )
-                      })}
-                      {/* Итого по услуге */}
-                      {svc.rows.length > 1 && (
-                        <tr key={`tot-${si}`} className="border-t border-[var(--border)] bg-[var(--muted)]/5 font-medium">
-                          <td className="px-3 py-2 pl-6 text-[var(--muted)]">Итого по услуге</td>
-                          <td className="px-3 py-2 text-right text-[var(--muted)]">—</td>
-                          <td className="px-3 py-2 text-right">{svc.totalDt > 0 ? formatMoneyInt(svc.totalDt) : '—'}</td>
-                          <td className="px-3 py-2 text-right">{svc.totalKt > 0 ? formatMoneyInt(svc.totalKt) : '—'}</td>
-                          <td className="px-3 py-2 text-right">{svc.totalDt !== svc.totalKt ? formatMoneyInt(Math.abs(svc.totalDt - svc.totalKt)) : '—'}</td>
-                          <td className={`px-3 py-2 text-right text-xs font-semibold ${svc.totalDt >= svc.totalKt ? 'text-blue-600 dark:text-blue-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                            {svc.totalDt !== svc.totalKt ? (svc.totalDt >= svc.totalKt ? 'Дт' : 'Кт') : '—'}
+                      {!isOsvCollapsed && svc.rows.map(row => (
+                        <tr key={`${si}-${row.account}`} className="border-t border-[var(--border)]/50 hover:bg-[var(--muted)]/5">
+                          <td className="px-3 py-2 pl-6 text-[var(--muted)]">
+                            <span className="font-medium text-[var(--foreground)]">{row.account}</span>
+                            {accountName[row.account] ? <span className="ml-2 text-xs text-[var(--muted)]">{accountName[row.account]}</span> : null}
                           </td>
+                          <td className="px-3 py-2 text-right text-blue-600 dark:text-blue-400">{row.openingNet > 0 ? formatMoneyInt(row.openingNet) : '—'}</td>
+                          <td className="px-3 py-2 text-right text-emerald-600 dark:text-emerald-400">{row.openingNet < 0 ? formatMoneyInt(-row.openingNet) : '—'}</td>
+                          <td className="px-3 py-2 text-right">{row.periodDt > 0 ? formatMoneyInt(row.periodDt) : '—'}</td>
+                          <td className="px-3 py-2 text-right">{row.periodKt > 0 ? formatMoneyInt(row.periodKt) : '—'}</td>
+                          <td className="px-3 py-2 text-right font-medium text-blue-600 dark:text-blue-400">{row.closingNet > 0 ? formatMoneyInt(row.closingNet) : '—'}</td>
+                          <td className="px-3 py-2 text-right font-medium text-emerald-600 dark:text-emerald-400">{row.closingNet < 0 ? formatMoneyInt(-row.closingNet) : '—'}</td>
+                        </tr>
+                      ))}
+                      {/* Итого по услуге */}
+                      {!isOsvCollapsed && svc.rows.length > 1 && (
+                        <tr className="border-t border-[var(--border)] bg-[var(--muted)]/5 font-medium">
+                          <td className="px-3 py-2 pl-6 text-[var(--muted)]">Итого по услуге</td>
+                          <td className="px-3 py-2 text-right text-blue-600 dark:text-blue-400">{svc.totalOpeningNet > 0 ? formatMoneyInt(svc.totalOpeningNet) : '—'}</td>
+                          <td className="px-3 py-2 text-right text-emerald-600 dark:text-emerald-400">{svc.totalOpeningNet < 0 ? formatMoneyInt(-svc.totalOpeningNet) : '—'}</td>
+                          <td className="px-3 py-2 text-right">{svc.totalPeriodDt > 0 ? formatMoneyInt(svc.totalPeriodDt) : '—'}</td>
+                          <td className="px-3 py-2 text-right">{svc.totalPeriodKt > 0 ? formatMoneyInt(svc.totalPeriodKt) : '—'}</td>
+                          <td className="px-3 py-2 text-right font-medium text-blue-600 dark:text-blue-400">{svc.totalClosingNet > 0 ? formatMoneyInt(svc.totalClosingNet) : '—'}</td>
+                          <td className="px-3 py-2 text-right font-medium text-emerald-600 dark:text-emerald-400">{svc.totalClosingNet < 0 ? formatMoneyInt(-svc.totalClosingNet) : '—'}</td>
                         </tr>
                       )}
-                    </>
-                  ))}
+                    </React.Fragment>
+                    )
+                  })}
                   {/* Итого по клиенту */}
                   {osvData.length > 1 && (() => {
-                    const grandDt = osvData.reduce((s, d) => s + d.totalDt, 0)
-                    const grandKt = osvData.reduce((s, d) => s + d.totalKt, 0)
+                    const grandOpenNet = osvData.reduce((s, d) => s + d.totalOpeningNet, 0)
+                    const grandPeriodDt = osvData.reduce((s, d) => s + d.totalPeriodDt, 0)
+                    const grandPeriodKt = osvData.reduce((s, d) => s + d.totalPeriodKt, 0)
+                    const grandCloseNet = osvData.reduce((s, d) => s + d.totalClosingNet, 0)
                     return (
                       <tr className="border-t-2 border-[var(--border)] bg-[var(--muted)]/10 font-bold">
                         <td className="px-3 py-2">Итого по клиенту</td>
-                        <td className="px-3 py-2 text-right text-[var(--muted)]">—</td>
-                        <td className="px-3 py-2 text-right">{grandDt > 0 ? formatMoneyInt(grandDt) : '—'}</td>
-                        <td className="px-3 py-2 text-right">{grandKt > 0 ? formatMoneyInt(grandKt) : '—'}</td>
-                        <td className="px-3 py-2 text-right">{grandDt !== grandKt ? formatMoneyInt(Math.abs(grandDt - grandKt)) : '—'}</td>
-                        <td className={`px-3 py-2 text-right text-xs font-semibold ${grandDt >= grandKt ? 'text-blue-600 dark:text-blue-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                          {grandDt !== grandKt ? (grandDt >= grandKt ? 'Дт' : 'Кт') : '—'}
-                        </td>
+                        <td className="px-3 py-2 text-right text-blue-600 dark:text-blue-400">{grandOpenNet > 0 ? formatMoneyInt(grandOpenNet) : '—'}</td>
+                        <td className="px-3 py-2 text-right text-emerald-600 dark:text-emerald-400">{grandOpenNet < 0 ? formatMoneyInt(-grandOpenNet) : '—'}</td>
+                        <td className="px-3 py-2 text-right">{grandPeriodDt > 0 ? formatMoneyInt(grandPeriodDt) : '—'}</td>
+                        <td className="px-3 py-2 text-right">{grandPeriodKt > 0 ? formatMoneyInt(grandPeriodKt) : '—'}</td>
+                        <td className="px-3 py-2 text-right text-blue-600 dark:text-blue-400">{grandCloseNet > 0 ? formatMoneyInt(grandCloseNet) : '—'}</td>
+                        <td className="px-3 py-2 text-right text-emerald-600 dark:text-emerald-400">{grandCloseNet < 0 ? formatMoneyInt(-grandCloseNet) : '—'}</td>
                       </tr>
                     )
                   })()}
                 </tbody>
               </table>
             </div>
+            </div>)}
+
+            {/* Бухгалтерские проводки в разрезе услуг */}
+            {(() => {
+              const filteredJournal = journalEntries.filter(e => e.entry_date >= periodFromDate && e.entry_date <= periodToDate)
+              const svcOrder = Array.from(new Set(filteredJournal.map(e => e.service_name || '(без услуги)')))
+              const bySvc = new Map<string, JournalEntry[]>()
+              filteredJournal.forEach(e => {
+                const key = e.service_name || '(без услуги)'
+                if (!bySvc.has(key)) bySvc.set(key, [])
+                bySvc.get(key)!.push(e)
+              })
+              return (
+                <div>
+                  <h3 className="mb-2 text-base font-medium text-[var(--foreground)]">Бухгалтерские проводки</h3>
+                  <div className="overflow-auto rounded-lg border border-[var(--border)]">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-[var(--muted)]/10">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Операция</th>
+                          <th className="px-3 py-2 text-left font-medium text-[var(--muted)]">Дата</th>
+                          <th className="px-3 py-2 text-center font-medium text-[var(--muted)]">Дт</th>
+                          <th className="px-3 py-2 text-center font-medium text-[var(--muted)]">Кт</th>
+                          <th className="px-3 py-2 text-right font-medium text-[var(--muted)]">Сумма</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {svcOrder.map(svcName => {
+                          const rows = bySvc.get(svcName) ?? []
+                          const total = rows.reduce((s, e) => s + Number(e.amount), 0)
+                          return (
+                            <React.Fragment key={svcName}>
+                              <tr
+                                className="bg-[var(--muted)]/5 border-t border-[var(--border)] cursor-pointer select-none hover:bg-[var(--muted)]/10 transition-colors"
+                                onClick={() => setJournalCollapsed(prev => {
+                                  const next = new Set(prev)
+                                  if (next.has(svcName)) next.delete(svcName)
+                                  else next.add(svcName)
+                                  return next
+                                })}
+                              >
+                                <td colSpan={5} className="px-3 py-2 font-semibold text-[var(--foreground)]">
+                                  <span className="mr-2 inline-block w-3 text-[var(--muted)] text-xs">
+                                    {journalCollapsed.has(svcName) ? '▶' : '▼'}
+                                  </span>
+                                  {svcName}
+                                  {journalCollapsed.has(svcName) && (
+                                    <span className="ml-3 text-xs font-normal text-[var(--muted)]">{rows.length} проводок · {formatMoneyInt(total)}</span>
+                                  )}
+                                </td>
+                              </tr>
+                              {!journalCollapsed.has(svcName) && rows.map(e => (
+                                <tr key={e.id} className="border-t border-[var(--border)]/50 hover:bg-[var(--muted)]/5">
+                                  <td className="px-3 py-2 pl-6">{docTypeLabel(e.document_type)}</td>
+                                  <td className="px-3 py-2 text-[var(--muted)]">{formatDate(e.entry_date)}</td>
+                                  <td className="px-3 py-2 text-center font-mono text-blue-600 dark:text-blue-400">{e.debit_account_code}</td>
+                                  <td className="px-3 py-2 text-center font-mono text-emerald-600 dark:text-emerald-400">{e.credit_account_code}</td>
+                                  <td className="px-3 py-2 text-right tabular-nums">{formatMoneyInt(e.amount)}</td>
+                                </tr>
+                              ))}
+                              {!journalCollapsed.has(svcName) && rows.length > 1 && (
+                                <tr className="border-t border-[var(--border)] bg-[var(--muted)]/5 font-medium">
+                                  <td colSpan={4} className="px-3 py-2 pl-6 text-[var(--muted)]">Итого по услуге</td>
+                                  <td className="px-3 py-2 text-right tabular-nums">{formatMoneyInt(total)}</td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )
+            })()}
           </section>
         )}
       </div>
@@ -1308,6 +1524,42 @@ export default function ClientCardPage() {
         onConfirm={handleConfirmEdit}
         onCancel={() => !confirmSubmitting && setConfirm({ open: false, type: 'charge', id: 0 })}
       />
+
+      {keepPauseModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-xl">
+            <h3 className="mb-1 text-base font-bold text-[var(--foreground)]">Данные о паузе</h3>
+            <p className="mb-5 text-sm text-[var(--muted)]">
+              У начисления есть заморозка. Сохранить данные о паузе?
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                className="rounded-lg bg-blue-600 px-4 py-3 text-left text-sm font-semibold text-white hover:bg-blue-500 transition-colors"
+                onClick={() => { requestChargeUpdate(keepPauseModal.data!); setKeepPauseModal({ open: false, data: null }) }}
+              >
+                Сохранить паузу
+                <span className="block text-xs font-normal opacity-80">Данные о заморозке останутся</span>
+              </button>
+              <button
+                type="button"
+                className="rounded-lg border border-[var(--border)] px-4 py-3 text-left text-sm font-medium hover:bg-[var(--muted)]/20 transition-colors"
+                onClick={() => { requestChargeUpdate({ ...keepPauseModal.data!, freeze_start: null, freeze_end: null, status: null }); setKeepPauseModal({ open: false, data: null }) }}
+              >
+                Очистить паузу
+                <span className="block text-xs font-normal opacity-60">Заморозка будет сброшена</span>
+              </button>
+              <button
+                type="button"
+                className="rounded-lg border border-[var(--border)] px-4 py-3 text-sm font-medium hover:bg-[var(--muted)]/20 transition-colors"
+                onClick={() => setKeepPauseModal({ open: false, data: null })}
+              >
+                Отмена
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {dupSubConfirm.open && (() => {
         const existingCharges = charges.filter(ch =>
@@ -1471,9 +1723,7 @@ export default function ClientCardPage() {
   )
 }
 
-const CHART_HEIGHT_PX = 180
-
-/** Понедельник недели для даты (ISO неделя) */
+/** Понедельник недели для даты */
 function getWeekMonday(d: Date): Date {
   const x = new Date(d)
   x.setHours(0, 0, 0, 0)
@@ -1483,319 +1733,273 @@ function getWeekMonday(d: Date): Date {
   return x
 }
 
-/** Ключ недели: YYYY-MM-DD понедельника */
-function weekKey(d: Date): string {
-  const m = getWeekMonday(d)
-  return m.toISOString().slice(0, 10)
+/** Первый понедельник на дату или после неё (аналог SQL first_monday_on_or_after) */
+function firstMonAfter(d: Date): Date {
+  const x = new Date(d)
+  x.setHours(0, 0, 0, 0)
+  const day = x.getDay()
+  if (day === 1) return x
+  x.setDate(x.getDate() + (day === 0 ? 1 : 8 - day))
+  return x
 }
 
-const SERVICE_PALETTE = [
-  { paid: '#1e40af', unpaid: '#93c5fd' }, // синий
-  { paid: '#6d28d9', unpaid: '#c4b5fd' }, // фиолетовый
-  { paid: '#0f766e', unpaid: '#5eead4' }, // бирюзовый
-  { paid: '#b45309', unpaid: '#fcd34d' }, // янтарный
-  { paid: '#15803d', unpaid: '#86efac' }, // зелёный
-  { paid: '#be185d', unpaid: '#f9a8d4' }, // розовый
-]
-const WINDOW_WEEKS = 25
-
-const Y_STEPS = [1000, 2000, 5000, 10000, 20000, 50000]
-
-/** Круглые деления оси Y (руб.): верхняя граница чуть выше maxVal, столбики занимают большую часть высоты. */
-function getYTicksMoney(maxVal: number): number[] {
-  if (maxVal <= 0) return [0]
-  const step = Y_STEPS.find(s => s >= maxVal / 5) ?? Y_STEPS[Y_STEPS.length - 1]
-  const top = Math.ceil((maxVal * 1.05) / step) * step || step
-  const ticks: number[] = []
-  for (let v = 0; v <= top; v += step) ticks.push(v)
-  return ticks
-}
-
-const BAR_WIDTH_PX = 28
-
-function ClientChargesChart({ charges, payments }: { charges: Charge[]; payments: Payment[] }) {
-  const [scrollPos, setScrollPos] = useState<number | null>(null)
-  const [drag, setDrag] = useState<{ x: number; startIndex: number } | null>(null)
-  const chartScrollRef = useRef<HTMLDivElement>(null)
-
+function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
+  charges: Charge[]
+  payments: Payment[]
+  journalEntries: JournalEntry[]
+}) {
+  const WINDOW = 16
   const today = new Date()
   today.setHours(0, 0, 0, 0)
-  const totalPaid = payments.reduce((s, p) => s + Number(p.amount), 0)
-  const totalCharged = charges.reduce((s, c) => s + Number(c.amount), 0)
+  const currentMonday = getWeekMonday(today)
+  const currentMondayStr = currentMonday.toISOString().slice(0, 10)
 
-  const byWeek = new Map<string, { total: number; byService: Record<string, number> }>()
-  charges.forEach(c => {
-    const startStr = c.start_date || c.created_at
-    const endStr = c.end_date || c.start_date || c.created_at
-    if (!startStr) return
-    const start = new Date(startStr)
-    const end = endStr ? new Date(endStr) : new Date(start)
-    start.setHours(0, 0, 0, 0)
-    end.setHours(0, 0, 0, 0)
-    const mondayEnd = getWeekMonday(end)
-    // Услуга оказывается со СЛЕДУЮЩЕЙ недели после даты начала (не с недели, содержащей start_date)
-    const mondayOfStartWeek = getWeekMonday(start)
-    const firstWeekMonday = new Date(mondayOfStartWeek)
-    firstWeekMonday.setDate(firstWeekMonday.getDate() + 7)
-    const firstWeekKey = firstWeekMonday.toISOString().slice(0, 10)
-    const endWeekKey = mondayEnd.toISOString().slice(0, 10)
-    if (firstWeekKey > endWeekKey) {
-      // Период короче одной недели по правилу «со следующей недели» — относим всю сумму на неделю окончания
-      const key = endWeekKey
-      if (!byWeek.has(key)) byWeek.set(key, { total: 0, byService: {} })
-      const rec = byWeek.get(key)!
-      rec.total += Number(c.amount)
-      rec.byService[c.service_name] = (rec.byService[c.service_name] ?? 0) + Number(c.amount)
-      return
-    }
-    const cursor = new Date(firstWeekMonday)
-    const weekKeysForCharge: string[] = []
-    while (cursor.getTime() <= mondayEnd.getTime()) {
-      weekKeysForCharge.push(cursor.toISOString().slice(0, 10))
-      cursor.setDate(cursor.getDate() + 7)
-    }
-    const numWeeks = weekKeysForCharge.length
-    const amountPerWeek = Number(c.amount) / numWeeks
-    weekKeysForCharge.forEach(key => {
-      if (!byWeek.has(key)) byWeek.set(key, { total: 0, byService: {} })
-      const rec = byWeek.get(key)!
-      rec.total += amountPerWeek
-      rec.byService[c.service_name] = (rec.byService[c.service_name] ?? 0) + amountPerWeek
-    })
+  const [windowStart, setWindowStart] = useState<Date>(() => {
+    const d = new Date(currentMonday)
+    d.setDate(d.getDate() - 8 * 7)
+    return d
   })
 
-  const currentWeekMonday = getWeekMonday(today)
-  const currentWeekKey = currentWeekMonday.toISOString().slice(0, 10)
-  const dataWeeks = Array.from(byWeek.keys()).sort()
-  const firstDataWeek = dataWeeks[0]
-  const lastDataWeek = dataWeeks[dataWeeks.length - 1]
-  const earliest = firstDataWeek ? new Date(firstDataWeek) : new Date(currentWeekMonday)
-  const latest = lastDataWeek ? new Date(lastDataWeek) : new Date(currentWeekMonday)
-  earliest.setDate(earliest.getDate() - 4 * 7)
-  latest.setDate(latest.getDate() + 4 * 7)
-  const allWeekKeys: string[] = []
-  const cursor = new Date(getWeekMonday(earliest))
-  while (cursor.getTime() <= latest.getTime()) {
-    allWeekKeys.push(cursor.toISOString().slice(0, 10))
-    cursor.setDate(cursor.getDate() + 7)
+  const activeSvcs = charges.filter(c => c.status !== 'cancelled')
+
+  // svcRec: service → weekKey → amount (from journal_entries weekly_recognition)
+  const svcRec = new Map<string, Map<string, number>>()
+  journalEntries.filter(e => e.document_type === 'weekly_recognition').forEach(e => {
+    if (!svcRec.has(e.service_name)) svcRec.set(e.service_name, new Map())
+    const m = svcRec.get(e.service_name)!
+    m.set(e.entry_date, (m.get(e.entry_date) ?? 0) + Number(e.amount))
+  })
+
+  // svcPaused: service → Set<weekKey> (weeks inside freeze period)
+  const svcPaused = new Map<string, Set<string>>()
+  activeSvcs.filter(c => c.freeze_start).forEach(c => {
+    if (!svcPaused.has(c.service_name)) svcPaused.set(c.service_name, new Set())
+    const ps = svcPaused.get(c.service_name)!
+    const freezeStartMon = firstMonAfter(new Date(c.freeze_start! + 'T00:00:00'))
+    const freezeEndMon = c.freeze_end ? firstMonAfter(new Date(c.freeze_end + 'T00:00:00')) : null
+    const cur = new Date(freezeStartMon)
+    let guard = 0
+    while ((!freezeEndMon || cur < freezeEndMon) && guard < 156) {
+      ps.add(cur.toISOString().slice(0, 10))
+      cur.setDate(cur.getDate() + 7)
+      guard++
+    }
+  })
+
+  // svcPlanned: service → weekKey → amount (future weeks not yet recognized, not paused)
+  const svcPlanned = new Map<string, Map<string, number>>()
+  activeSvcs.forEach(c => {
+    const startD = c.start_date ? new Date(c.start_date + 'T00:00:00') : new Date(c.created_at)
+    const endD = c.end_date ? new Date(c.end_date + 'T00:00:00') : startD
+    const firstMon = firstMonAfter(startD)
+    const endMon = getWeekMonday(endD)
+    const pausedSet = svcPaused.get(c.service_name) ?? new Set<string>()
+    const recMap = svcRec.get(c.service_name) ?? new Map<string, number>()
+
+    // Count total non-freeze weeks for amount_per_week
+    let totalWeeks = 0
+    const cur = new Date(firstMon)
+    while (cur <= endMon) {
+      if (!pausedSet.has(cur.toISOString().slice(0, 10))) totalWeeks++
+      cur.setDate(cur.getDate() + 7)
+    }
+    if (totalWeeks === 0) totalWeeks = 1
+    const apw = Number(c.amount) / totalWeeks
+
+    if (!svcPlanned.has(c.service_name)) svcPlanned.set(c.service_name, new Map())
+    const pm = svcPlanned.get(c.service_name)!
+    const cur2 = new Date(firstMon)
+    while (cur2 <= endMon) {
+      const wk = cur2.toISOString().slice(0, 10)
+      if (wk > currentMondayStr && !recMap.has(wk) && !pausedSet.has(wk)) {
+        pm.set(wk, (pm.get(wk) ?? 0) + apw)
+      }
+      cur2.setDate(cur2.getDate() + 7)
+    }
+  })
+
+  // All-time recognized totals per week (for payment distribution)
+  const allWeekRecTotal = new Map<string, number>()
+  svcRec.forEach(m => m.forEach((amt, wk) => {
+    allWeekRecTotal.set(wk, (allWeekRecTotal.get(wk) ?? 0) + amt)
+  }))
+
+  // Cumulative payment distribution oldest-first
+  const totalPaid = payments.reduce((s, p) => s + Number(p.amount), 0)
+  let consumed = 0
+  const weekStatus = new Map<string, 'paid' | 'partial' | 'unpaid'>()
+  const weekPaidAmt = new Map<string, number>()
+  Array.from(allWeekRecTotal.keys()).sort().forEach(wk => {
+    const total = allWeekRecTotal.get(wk)!
+    const paidHere = Math.min(total, Math.max(0, totalPaid - consumed))
+    consumed += paidHere
+    weekPaidAmt.set(wk, paidHere)
+    if (total <= 0) return
+    if (paidHere >= total - 0.01) weekStatus.set(wk, 'paid')
+    else if (paidHere > 0.01) weekStatus.set(wk, 'partial')
+    else weekStatus.set(wk, 'unpaid')
+  })
+
+  // Services to display (unique names from active charges)
+  const allSvcNames = Array.from(new Set(activeSvcs.map(c => c.service_name)))
+
+  // Build 16-week window
+  const weeks: string[] = []
+  const wCur = new Date(windowStart)
+  for (let i = 0; i < WINDOW; i++) {
+    weeks.push(wCur.toISOString().slice(0, 10))
+    wCur.setDate(wCur.getDate() + 7)
   }
 
-  // Оплаченная сумма по неделям: оплаты «съедают» недели с начала (по порядку)
-  const paidAmountByWeek = new Map<string, number>()
-  let consumed = 0
-  allWeekKeys.forEach(key => {
-    const total = byWeek.get(key)?.total ?? 0
-    const paidThisWeek = total <= 0 ? 0 : Math.min(total, Math.max(0, totalPaid - consumed))
-    consumed += paidThisWeek
-    paidAmountByWeek.set(key, paidThisWeek)
+  const navigate = (delta: number) => setWindowStart(prev => {
+    const d = new Date(prev)
+    d.setDate(d.getDate() + delta * 7)
+    return d
+  })
+  const goToday = () => setWindowStart(() => {
+    const d = new Date(currentMonday)
+    d.setDate(d.getDate() - 8 * 7)
+    return d
   })
 
-  const allServices = Array.from(new Set(charges.map(c => c.service_name)))
-  const serviceColorMap: Record<string, { paid: string; unpaid: string }> = {}
-  allServices.forEach((svc, i) => { serviceColorMap[svc] = SERVICE_PALETTE[i % SERVICE_PALETTE.length]! })
-
-  const windowSize = Math.min(WINDOW_WEEKS, allWeekKeys.length)
-  const maxStart = Math.max(0, allWeekKeys.length - windowSize)
-  const currentWeekIndex = allWeekKeys.indexOf(currentWeekKey)
-  const centerStartIndex = currentWeekIndex >= 0 ? Math.max(0, Math.min(currentWeekIndex - 12, maxStart)) : 0
-  const effectiveScrollPos = scrollPos === null ? (maxStart > 0 ? centerStartIndex / maxStart : 0) : scrollPos
-  const startIndex = Math.min(maxStart, Math.round(effectiveScrollPos * maxStart))
-  const weekKeys = allWeekKeys.slice(startIndex, startIndex + windowSize)
-
-  const dataMaxSum = Math.max(0, ...weekKeys.map(k => byWeek.get(k)?.total ?? 0))
-  const yTicks = getYTicksMoney(dataMaxSum)
-  const yMax = Math.max(1, yTicks[yTicks.length - 1] ?? 1)
-
-  const datePart = (key: string) => {
-    const [, m, d] = key.split('-').map(Number)
+  const fmtShort = (n: number) => {
+    if (n === 0) return '—'
+    if (Math.abs(n) >= 1000) return `${Math.round(n / 1000)}к`
+    return `${Math.round(n)}`
+  }
+  const dateFmt = (wk: string) => {
+    const [, m, d] = wk.split('-').map(Number)
     return `${String(d).padStart(2, '0')}.${String(m).padStart(2, '0')}`
   }
-  const yearPart = (key: string) => key.slice(0, 4)
 
-  const yearShades = ['#fce7f3', '#fbcfe8', '#f9a8d4', '#f472b6', '#ec4899']
-  const yearsInView = Array.from(new Set(weekKeys.map(yearPart))).sort()
-  const yearToShade: Record<string, string> = {}
-  yearsInView.forEach((y, i) => { yearToShade[y] = yearShades[i % yearShades.length] })
-  // Группы подряд идущих недель одного года — одна полоса на год (как на главной странице)
-  const yearGroups: { year: string; count: number }[] = []
-  weekKeys.forEach((key) => {
-    const y = yearPart(key)
-    if (yearGroups.length > 0 && yearGroups[yearGroups.length - 1].year === y)
-      yearGroups[yearGroups.length - 1].count += 1
-    else yearGroups.push({ year: y, count: 1 })
-  })
-  const COL_PX = 28
-  const GAP_PX = 2
-  const stripWidth = (count: number) => count * (COL_PX + GAP_PX) - GAP_PX
-
-  useEffect(() => {
-    if (!drag) return
-    const onMove = (e: MouseEvent) => {
-      const deltaPx = e.clientX - drag.x
-      const deltaWeeks = -Math.round(deltaPx / BAR_WIDTH_PX)
-      const newStartIndex = Math.max(0, Math.min(maxStart, drag.startIndex + deltaWeeks))
-      const newPos = maxStart > 0 ? newStartIndex / maxStart : 0
-      setScrollPos(newPos) // явная позиция после перетаскивания
-    }
-    const onUp = () => setDrag(null)
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-  }, [drag, maxStart])
-
-  const onChartMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0) return
-    setDrag({ x: e.clientX, startIndex })
+  if (activeSvcs.length === 0) {
+    return <p className="text-sm text-[var(--muted)]">Нет начислений для отображения.</p>
   }
 
   return (
-    <div className="space-y-4">
-      <div
-        ref={chartScrollRef}
-        className="overflow-x-auto select-none"
-        style={{ cursor: drag ? 'grabbing' : 'grab' }}
-        onMouseDown={onChartMouseDown}
-      >
-        <div className="inline-flex flex-col pt-2">
-          {/* Строка: ось Y + столбики (столбики растут от линии нуля вверх) */}
-          <div className="flex items-end gap-0.5" style={{ height: CHART_HEIGHT_PX }}>
-            <div className="flex w-14 flex-col justify-between pr-2 text-right text-xs text-[var(--muted)] shrink-0" style={{ height: CHART_HEIGHT_PX }}>
-              {yTicks.slice().reverse().map((t) => (
-                <span key={t}>{formatMoney(t)}</span>
-              ))}
-            </div>
-            <div className="relative flex items-end gap-0.5" style={{ height: CHART_HEIGHT_PX }}>
-              <div className="absolute inset-0 pointer-events-none" style={{ height: CHART_HEIGHT_PX }} aria-hidden>
-                {yTicks.filter((t) => t > 0).map((tick) => (
-                  <div
-                    key={tick}
-                    className="absolute left-0 right-0 border-b border-zinc-200 dark:border-zinc-600"
-                    style={{ bottom: `${(tick / yMax) * 100}%` }}
-                  />
-                ))}
-              </div>
-              {weekKeys.map((key) => {
-                const data = byWeek.get(key) ?? { total: 0, byService: {} }
-                const weekMonday = new Date(key)
-                const isFuture = weekMonday > today
-                const isCurrent = key === currentWeekKey
-                const paidAmount = paidAmountByWeek.get(key) ?? 0
-                const paidRatio = data.total > 0 ? Math.min(1, paidAmount / data.total) : 0
-                const barHeightPx =
-                  yMax > 0 && data.total > 0
-                    ? Math.min(CHART_HEIGHT_PX, (data.total / yMax) * CHART_HEIGHT_PX)
-                    : 0
-                return (
-                  <div key={key} className="flex w-7 flex-shrink-0 flex-col justify-end" style={{ height: CHART_HEIGHT_PX }}>
-                    {barHeightPx > 0 && (
-                      <div
-                        className={`w-full rounded-t overflow-hidden border ${isCurrent ? 'border-2 border-blue-500' : 'border border-zinc-300 dark:border-zinc-600'}`}
-                        style={{
-                          height: barHeightPx,
-                          borderStyle: isFuture ? 'dashed' : 'solid',
-                          display: 'flex',
-                          flexDirection: 'column-reverse',
-                        }}
-                        title={`Неделя ${key}: ${formatMoney(data.total)} · Оплачено: ${formatMoney(paidAmount)}${allServices.length ? ` (${Object.entries(data.byService).map(([s, v]) => `${s}: ${formatMoney(v)}`).join(', ')})` : ''}`}
-                      >
-                        {(allServices.length ? allServices : ['']).map((serviceName) => {
-                          const serviceAmount = serviceName ? (data.byService[serviceName] ?? 0) : data.total
-                          if (serviceAmount <= 0) return null
-                          const svcColor = serviceColorMap[serviceName] ?? SERVICE_PALETTE[0]!
-                          const segmentHeight = (serviceAmount / data.total) * barHeightPx
-                          const paidHeightPx = Math.round(segmentHeight * paidRatio)
-                          const unpaidHeightPx = segmentHeight - paidHeightPx
-                          return (
-                            <React.Fragment key={serviceName || 'total'}>
-                              {unpaidHeightPx > 0 && (
-                                <div className="w-full flex-shrink-0 border-t border-white/30" style={{ height: unpaidHeightPx, background: isFuture ? `repeating-linear-gradient(-45deg, ${svcColor.unpaid}, ${svcColor.unpaid} 2px, transparent 2px, transparent 4px)` : svcColor.unpaid }} />
-                              )}
-                              {paidHeightPx > 0 && (
-                                <div className="w-full flex-shrink-0 border-t border-white/30" style={{ height: paidHeightPx, background: isFuture ? `repeating-linear-gradient(-45deg, ${svcColor.paid}, ${svcColor.paid} 2px, transparent 2px, transparent 4px)` : svcColor.paid }} />
-                              )}
-                            </React.Fragment>
-                          )
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-          {/* Линия нуля — выше подписей */}
-          <div className="flex gap-0.5 border-t-2 border-zinc-400 dark:border-zinc-500 mt-0">
-            <div className="w-14 shrink-0" />
-            <div className="flex gap-0.5 flex-1 min-w-0" aria-hidden>
-              {weekKeys.map((key) => {
-                const isCurrent = key === currentWeekKey
-                return <div key={key} className="w-7 flex-shrink-0" />
-              })}
-            </div>
-          </div>
-          {/* Подписи дат — ниже линии нуля */}
-          <div className="flex gap-0.5 mt-0.5">
-            <div className="w-14 shrink-0" />
-            <div className="flex gap-0.5 flex-1 min-w-0">
-              {weekKeys.map((key) => {
-                const isCurrent = key === currentWeekKey
-                return (
-                  <div key={key} className="flex w-7 flex-shrink-0 flex-col items-center text-center">
-                    <span className={`block text-[10px] leading-tight ${isCurrent ? 'font-semibold text-blue-600 dark:text-blue-400' : 'text-[var(--muted)]'}`} title={isCurrent ? 'Текущая неделя' : key}>
-                      {datePart(key)}
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-          {/* Одна полоса на год с подписью года — как на главной странице */}
-          <div className="flex mt-0.5 gap-0.5 pb-2">
-            <div className="w-14 shrink-0" />
-            <div className="flex gap-0.5" style={{ width: stripWidth(weekKeys.length) }}>
-              {yearGroups.map((g) => (
-                <div
-                  key={g.year}
-                  className="flex items-center rounded px-1 py-0.5 text-[9px] font-medium leading-tight text-[var(--muted-foreground)] shrink-0"
-                  style={{
-                    width: stripWidth(g.count),
-                    backgroundColor: yearToShade[g.year] ?? yearShades[0],
-                  }}
-                  title={g.year}
-                >
-                  {g.year}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+    <div className="space-y-3">
+      {/* Навигация */}
+      <div className="flex items-center gap-1.5 text-xs">
+        <button onClick={() => navigate(-8)} className="px-2 py-1 rounded bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">◄◄</button>
+        <button onClick={() => navigate(-1)} className="px-2 py-1 rounded bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">◄</button>
+        <button onClick={goToday} className="px-2 py-1 rounded bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900 transition-colors">сегодня</button>
+        <button onClick={() => navigate(1)} className="px-2 py-1 rounded bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">►</button>
+        <button onClick={() => navigate(8)} className="px-2 py-1 rounded bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">►►</button>
+        <span className="ml-2 text-[var(--muted)]">{dateFmt(weeks[0])} — {dateFmt(weeks[weeks.length - 1])}</span>
       </div>
-      <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-[var(--muted)]">
-        {allServices.length > 0 ? allServices.map(svc => {
-          const c = serviceColorMap[svc] ?? SERVICE_PALETTE[0]!
-          return (
-            <span key={svc} className="flex items-center gap-1.5">
-              <span className="inline-flex gap-0.5">
-                <span className="inline-block w-3 h-3 rounded-sm" style={{ background: c.paid }} />
-                <span className="inline-block w-3 h-3 rounded-sm" style={{ background: c.unpaid }} />
-              </span>
-              {svc}
-            </span>
-          )
-        }) : (
-          <>
-            <span><span className="inline-block w-3 h-3 rounded mr-1" style={{ background: SERVICE_PALETTE[0]!.paid }} /> Оплачено</span>
-            <span><span className="inline-block w-3 h-3 rounded mr-1" style={{ background: SERVICE_PALETTE[0]!.unpaid }} /> Не оплачено</span>
-          </>
-        )}
-        <span className="text-[var(--muted)]/70">(тёмный = оплачено, светлый = неоплачено)</span>
+
+      {/* Таблица */}
+      <div className="overflow-x-auto">
+        <table className="text-xs border-collapse" style={{ minWidth: 'max-content' }}>
+          <thead>
+            <tr>
+              <th className="text-left pr-4 py-1.5 font-medium text-[var(--muted)] sticky left-0 bg-[var(--background)] z-10 min-w-[130px]">Услуга</th>
+              {weeks.map(wk => (
+                <th key={wk} className={`text-center px-0.5 py-1.5 font-medium w-11 min-w-[44px] ${wk === currentMondayStr ? 'text-blue-600 dark:text-blue-400' : 'text-[var(--muted)]'}`}>
+                  {dateFmt(wk)}
+                  {wk === currentMondayStr && <div className="w-full h-0.5 bg-blue-500 rounded mt-0.5" />}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {allSvcNames.map(svc => {
+              const recMap = svcRec.get(svc) ?? new Map<string, number>()
+              const plannedMap = svcPlanned.get(svc) ?? new Map<string, number>()
+              const pausedSet = svcPaused.get(svc) ?? new Set<string>()
+              return (
+                <tr key={svc} className="border-t border-zinc-100 dark:border-zinc-800">
+                  <td className="pr-4 py-1.5 font-medium text-[var(--foreground)] sticky left-0 bg-[var(--background)] z-10 max-w-[160px] truncate" title={svc}>
+                    {svc}
+                  </td>
+                  {weeks.map(wk => {
+                    const recAmt = recMap.get(wk) ?? 0
+                    const planAmt = plannedMap.get(wk) ?? 0
+                    const isPaused = pausedSet.has(wk) && recAmt === 0 && planAmt === 0
+                    const status = weekStatus.get(wk)
+
+                    if (isPaused) return (
+                      <td key={wk} className="text-center px-0.5 py-1.5">
+                        <span className="inline-flex items-center justify-center w-9 h-8 rounded text-xs bg-zinc-100 dark:bg-zinc-800 text-zinc-400" title="Заморозка">⏸</span>
+                      </td>
+                    )
+
+                    if (recAmt > 0) {
+                      const bgCls = status === 'paid'
+                        ? 'bg-green-100 dark:bg-green-950/60 text-green-700 dark:text-green-400'
+                        : status === 'partial'
+                          ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400'
+                          : 'bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-400'
+                      const icon = status === 'paid' ? '✓' : status === 'partial' ? '~' : '!'
+                      const hint = `Оказано: ${formatMoney(recAmt)}${status === 'partial' ? ` · Оплачено: ${formatMoney(weekPaidAmt.get(wk) ?? 0)}` : ''}`
+                      return (
+                        <td key={wk} className="text-center px-0.5 py-1.5">
+                          <span className={`inline-flex flex-col items-center justify-center w-9 h-8 rounded text-[10px] font-semibold ${bgCls}`} title={hint}>
+                            <span className="leading-none">{icon}</span>
+                            <span className="leading-none mt-0.5">{fmtShort(recAmt)}</span>
+                          </span>
+                        </td>
+                      )
+                    }
+
+                    if (planAmt > 0) return (
+                      <td key={wk} className="text-center px-0.5 py-1.5">
+                        <span className="inline-flex flex-col items-center justify-center w-9 h-8 rounded text-[10px] font-semibold bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-400 border border-dashed border-sky-300 dark:border-sky-700" title={`Запланировано: ${formatMoney(planAmt)}`}>
+                          <span className="leading-none">○</span>
+                          <span className="leading-none mt-0.5">{fmtShort(planAmt)}</span>
+                        </span>
+                      </td>
+                    )
+
+                    return <td key={wk} className="text-center px-0.5 py-1.5 text-zinc-300 dark:text-zinc-700">·</td>
+                  })}
+                </tr>
+              )
+            })}
+
+            {/* Строка итого */}
+            <tr className="border-t-2 border-zinc-300 dark:border-zinc-600">
+              <td className="pr-4 py-1.5 font-semibold text-[var(--foreground)] sticky left-0 bg-[var(--background)] z-10">Итого</td>
+              {weeks.map(wk => {
+                let recTotal = 0
+                svcRec.forEach(m => { recTotal += m.get(wk) ?? 0 })
+                let planTotal = 0
+                svcPlanned.forEach(m => { planTotal += m.get(wk) ?? 0 })
+                const status = weekStatus.get(wk)
+                const paidAmt = weekPaidAmt.get(wk) ?? 0
+
+                if (recTotal > 0) {
+                  const cls = status === 'paid'
+                    ? 'text-green-700 dark:text-green-400'
+                    : status === 'partial'
+                      ? 'text-amber-700 dark:text-amber-400'
+                      : 'text-red-700 dark:text-red-400'
+                  return (
+                    <td key={wk} className={`text-center px-0.5 py-1.5 font-bold ${cls}`} title={`${formatMoney(recTotal)} · оплачено ${formatMoney(paidAmt)}`}>
+                      {fmtShort(recTotal)}
+                    </td>
+                  )
+                }
+                if (planTotal > 0) return (
+                  <td key={wk} className="text-center px-0.5 py-1.5 font-semibold text-sky-500 dark:text-sky-400" title={`Запланировано: ${formatMoney(planTotal)}`}>
+                    {fmtShort(planTotal)}
+                  </td>
+                )
+                return <td key={wk} className="text-center px-0.5 py-1.5 text-zinc-300 dark:text-zinc-700">—</td>
+              })}
+            </tr>
+          </tbody>
+        </table>
       </div>
-      {charges.length === 0 && (
-        <p className="text-sm text-[var(--muted)]">Нет начислений для графика. Добавьте начисления выше.</p>
-      )}
+
+      {/* Легенда */}
+      <div className="flex flex-wrap gap-3 text-xs text-[var(--muted)]">
+        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-green-100 text-green-700 font-bold">✓</span>Оплачено</span>
+        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-red-100 text-red-700 font-bold">!</span>Не оплачено</span>
+        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-amber-100 text-amber-700 font-bold">~</span>Частично</span>
+        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-sky-50 text-sky-600 border border-dashed border-sky-300">○</span>Запланировано</span>
+        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-zinc-100 text-zinc-400">⏸</span>Заморозка</span>
+      </div>
     </div>
   )
 }

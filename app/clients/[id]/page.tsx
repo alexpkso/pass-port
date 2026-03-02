@@ -1748,17 +1748,12 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
   payments: Payment[]
   journalEntries: JournalEntry[]
 }) {
-  const WINDOW = 16
+  const toYMD = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   const currentMonday = getWeekMonday(today)
-  const currentMondayStr = currentMonday.toISOString().slice(0, 10)
-
-  const [windowStart, setWindowStart] = useState<Date>(() => {
-    const d = new Date(currentMonday)
-    d.setDate(d.getDate() - 8 * 7)
-    return d
-  })
+  const currentMondayStr = toYMD(currentMonday)
+  const scrollRef = React.useRef<HTMLDivElement>(null)
 
   const activeSvcs = charges.filter(c => c.status !== 'cancelled')
 
@@ -1780,7 +1775,7 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
     const cur = new Date(freezeStartMon)
     let guard = 0
     while ((!freezeEndMon || cur < freezeEndMon) && guard < 156) {
-      ps.add(cur.toISOString().slice(0, 10))
+      ps.add(toYMD(cur))
       cur.setDate(cur.getDate() + 7)
       guard++
     }
@@ -1800,7 +1795,7 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
     let totalWeeks = 0
     const cur = new Date(firstMon)
     while (cur <= endMon) {
-      if (!pausedSet.has(cur.toISOString().slice(0, 10))) totalWeeks++
+      if (!pausedSet.has(toYMD(cur))) totalWeeks++
       cur.setDate(cur.getDate() + 7)
     }
     if (totalWeeks === 0) totalWeeks = 1
@@ -1810,7 +1805,7 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
     const pm = svcPlanned.get(c.service_name)!
     const cur2 = new Date(firstMon)
     while (cur2 <= endMon) {
-      const wk = cur2.toISOString().slice(0, 10)
+      const wk = toYMD(cur2)
       if (wk > currentMondayStr && !recMap.has(wk) && !pausedSet.has(wk)) {
         pm.set(wk, (pm.get(wk) ?? 0) + apw)
       }
@@ -1843,34 +1838,53 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
   // Services to display (unique names from active charges)
   const allSvcNames = Array.from(new Set(activeSvcs.map(c => c.service_name)))
 
-  // Build 16-week window
+  // Build weeks: full range from earliest charge start to latest charge end
+  const rangeStart = activeSvcs.reduce((min, c) => {
+    const d = c.start_date ? new Date(c.start_date + 'T00:00:00') : new Date(c.created_at)
+    return d < min ? d : min
+  }, new Date())
+  const rangeEnd = activeSvcs.reduce((max, c) => {
+    const d = c.end_date ? new Date(c.end_date + 'T00:00:00') : new Date()
+    return d > max ? d : max
+  }, new Date(0))
   const weeks: string[] = []
-  const wCur = new Date(windowStart)
-  for (let i = 0; i < WINDOW; i++) {
-    weeks.push(wCur.toISOString().slice(0, 10))
+  const wCur = new Date(firstMonAfter(rangeStart))
+  wCur.setDate(wCur.getDate() - 4 * 7)
+  const wEnd = getWeekMonday(rangeEnd)
+  wEnd.setDate(wEnd.getDate() + 4 * 7)
+  while (wCur <= wEnd) {
+    weeks.push(toYMD(wCur))
     wCur.setDate(wCur.getDate() + 7)
   }
 
-  const navigate = (delta: number) => setWindowStart(prev => {
-    const d = new Date(prev)
-    d.setDate(d.getDate() + delta * 7)
-    return d
-  })
-  const goToday = () => setWindowStart(() => {
-    const d = new Date(currentMonday)
-    d.setDate(d.getDate() - 8 * 7)
-    return d
-  })
+  // Auto-scroll to today's column on mount
+  const todayIdx = weeks.indexOf(currentMondayStr)
+  React.useEffect(() => {
+    if (scrollRef.current && todayIdx >= 0) {
+      const stickyW = 160
+      const colW = 44
+      const containerW = scrollRef.current.clientWidth
+      scrollRef.current.scrollLeft = Math.max(0, stickyW + todayIdx * colW - (containerW - stickyW) / 2)
+    }
+  }, [todayIdx])
 
-  const fmtShort = (n: number) => {
-    if (n === 0) return '—'
-    if (Math.abs(n) >= 1000) return `${Math.round(n / 1000)}к`
-    return `${Math.round(n)}`
-  }
+  const fmtShort = (n: number) => n === 0 ? '—' : String(Math.round(n))
   const dateFmt = (wk: string) => {
     const [, m, d] = wk.split('-').map(Number)
     return `${String(d).padStart(2, '0')}.${String(m).padStart(2, '0')}`
   }
+
+  const BAR_H = 44 // px — высота контейнера бара
+  const maxAmt = (() => {
+    let m = 0
+    allSvcNames.forEach(svc => {
+      const recMap = svcRec.get(svc) ?? new Map<string, number>()
+      const plannedMap = svcPlanned.get(svc) ?? new Map<string, number>()
+      weeks.forEach(wk => { m = Math.max(m, recMap.get(wk) ?? 0, plannedMap.get(wk) ?? 0) })
+    })
+    return m > 0 ? m : 1
+  })()
+  const barPct = (amt: number) => Math.max(6, Math.round((amt / maxAmt) * 100))
 
   if (activeSvcs.length === 0) {
     return <p className="text-sm text-[var(--muted)]">Нет начислений для отображения.</p>
@@ -1878,22 +1892,12 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
 
   return (
     <div className="space-y-3">
-      {/* Навигация */}
-      <div className="flex items-center gap-1.5 text-xs">
-        <button onClick={() => navigate(-8)} className="px-2 py-1 rounded bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">◄◄</button>
-        <button onClick={() => navigate(-1)} className="px-2 py-1 rounded bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">◄</button>
-        <button onClick={goToday} className="px-2 py-1 rounded bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900 transition-colors">сегодня</button>
-        <button onClick={() => navigate(1)} className="px-2 py-1 rounded bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">►</button>
-        <button onClick={() => navigate(8)} className="px-2 py-1 rounded bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">►►</button>
-        <span className="ml-2 text-[var(--muted)]">{dateFmt(weeks[0])} — {dateFmt(weeks[weeks.length - 1])}</span>
-      </div>
-
       {/* Таблица */}
-      <div className="overflow-x-auto">
+      <div ref={scrollRef} className="overflow-x-auto">
         <table className="text-xs border-collapse" style={{ minWidth: 'max-content' }}>
           <thead>
             <tr>
-              <th className="text-left pr-4 py-1.5 font-medium text-[var(--muted)] sticky left-0 bg-[var(--background)] z-10 min-w-[130px]">Услуга</th>
+              <th className="text-left pl-3 pr-4 py-1.5 font-medium text-[var(--muted)] sticky left-0 bg-[var(--background)] z-10 min-w-[130px]">Услуга</th>
               {weeks.map(wk => (
                 <th key={wk} className={`text-center px-0.5 py-1.5 font-medium w-11 min-w-[44px] ${wk === currentMondayStr ? 'text-blue-600 dark:text-blue-400' : 'text-[var(--muted)]'}`}>
                   {dateFmt(wk)}
@@ -1909,7 +1913,7 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
               const pausedSet = svcPaused.get(svc) ?? new Set<string>()
               return (
                 <tr key={svc} className="border-t border-zinc-100 dark:border-zinc-800">
-                  <td className="pr-4 py-1.5 font-medium text-[var(--foreground)] sticky left-0 bg-[var(--background)] z-10 max-w-[160px] truncate" title={svc}>
+                  <td className="pl-3 pr-4 py-1.5 font-medium text-[var(--foreground)] sticky left-0 bg-[var(--background)] z-10 max-w-[160px] truncate" title={svc}>
                     {svc}
                   </td>
                   {weeks.map(wk => {
@@ -1919,39 +1923,40 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
                     const status = weekStatus.get(wk)
 
                     if (isPaused) return (
-                      <td key={wk} className="text-center px-0.5 py-1.5">
-                        <span className="inline-flex items-center justify-center w-9 h-8 rounded text-xs bg-zinc-100 dark:bg-zinc-800 text-zinc-400" title="Заморозка">⏸</span>
+                      <td key={wk} className="px-0.5 py-0 align-bottom">
+                        <div className="flex items-center justify-center w-9 text-zinc-400 text-xs" style={{ height: BAR_H }} title="Заморозка">⏸</div>
                       </td>
                     )
 
                     if (recAmt > 0) {
                       const bgCls = status === 'paid'
-                        ? 'bg-green-100 dark:bg-green-950/60 text-green-700 dark:text-green-400'
+                        ? 'bg-green-400 dark:bg-green-600'
                         : status === 'partial'
-                          ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400'
-                          : 'bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-400'
-                      const icon = status === 'paid' ? '✓' : status === 'partial' ? '~' : '!'
+                          ? 'bg-amber-400 dark:bg-amber-500'
+                          : 'bg-red-400 dark:bg-red-500'
                       const hint = `Оказано: ${formatMoney(recAmt)}${status === 'partial' ? ` · Оплачено: ${formatMoney(weekPaidAmt.get(wk) ?? 0)}` : ''}`
                       return (
-                        <td key={wk} className="text-center px-0.5 py-1.5">
-                          <span className={`inline-flex flex-col items-center justify-center w-9 h-8 rounded text-[10px] font-semibold ${bgCls}`} title={hint}>
-                            <span className="leading-none">{icon}</span>
-                            <span className="leading-none mt-0.5">{fmtShort(recAmt)}</span>
-                          </span>
+                        <td key={wk} className="px-0.5 py-0 align-bottom">
+                          <div className="flex flex-col justify-end" style={{ height: BAR_H }}>
+                            <div className={`w-9 rounded-t-sm ${bgCls}`} style={{ height: `${barPct(recAmt)}%` }} title={hint} />
+                          </div>
                         </td>
                       )
                     }
 
                     if (planAmt > 0) return (
-                      <td key={wk} className="text-center px-0.5 py-1.5">
-                        <span className="inline-flex flex-col items-center justify-center w-9 h-8 rounded text-[10px] font-semibold bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-400 border border-dashed border-sky-300 dark:border-sky-700" title={`Запланировано: ${formatMoney(planAmt)}`}>
-                          <span className="leading-none">○</span>
-                          <span className="leading-none mt-0.5">{fmtShort(planAmt)}</span>
-                        </span>
+                      <td key={wk} className="px-0.5 py-0 align-bottom">
+                        <div className="flex flex-col justify-end" style={{ height: BAR_H }}>
+                          <div className="w-9 rounded-t-sm bg-sky-200 dark:bg-sky-900/60 border border-dashed border-sky-400 dark:border-sky-600" style={{ height: `${barPct(planAmt)}%` }} title={`Запланировано: ${formatMoney(planAmt)}`} />
+                        </div>
                       </td>
                     )
 
-                    return <td key={wk} className="text-center px-0.5 py-1.5 text-zinc-300 dark:text-zinc-700">·</td>
+                    return (
+                      <td key={wk} className="px-0.5 py-0 align-bottom">
+                        <div style={{ height: BAR_H }} />
+                      </td>
+                    )
                   })}
                 </tr>
               )
@@ -1959,7 +1964,7 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
 
             {/* Строка итого */}
             <tr className="border-t-2 border-zinc-300 dark:border-zinc-600">
-              <td className="pr-4 py-1.5 font-semibold text-[var(--foreground)] sticky left-0 bg-[var(--background)] z-10">Итого</td>
+              <td className="pl-3 pr-4 py-1.5 font-semibold text-[var(--foreground)] sticky left-0 bg-[var(--background)] z-10">Итого, ₽</td>
               {weeks.map(wk => {
                 let recTotal = 0
                 svcRec.forEach(m => { recTotal += m.get(wk) ?? 0 })
@@ -1994,11 +1999,11 @@ function WeeklyPaymentMatrix({ charges, payments, journalEntries }: {
 
       {/* Легенда */}
       <div className="flex flex-wrap gap-3 text-xs text-[var(--muted)]">
-        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-green-100 text-green-700 font-bold">✓</span>Оплачено</span>
-        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-red-100 text-red-700 font-bold">!</span>Не оплачено</span>
-        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-amber-100 text-amber-700 font-bold">~</span>Частично</span>
-        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-sky-50 text-sky-600 border border-dashed border-sky-300">○</span>Запланировано</span>
-        <span className="flex items-center gap-1.5"><span className="inline-flex items-center justify-center w-5 h-5 rounded bg-zinc-100 text-zinc-400">⏸</span>Заморозка</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm bg-green-400" />Оплачено</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm bg-red-400" />Не оплачено</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm bg-amber-400" />Частично</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm bg-sky-200 border border-dashed border-sky-400" />Запланировано</span>
+        <span className="flex items-center gap-1.5"><span className="text-zinc-400">⏸</span>Заморозка</span>
       </div>
     </div>
   )

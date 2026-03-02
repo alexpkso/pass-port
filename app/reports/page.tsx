@@ -84,8 +84,9 @@ export default function ReportsPage() {
 
   useEffect(() => {
     const d = new Date()
+    const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     setPeriodFrom(`${d.getFullYear()}-01-01`)
-    setPeriodTo(d.toISOString().slice(0, 10))
+    setPeriodTo(ymd)
   }, [])
 
   useEffect(() => {

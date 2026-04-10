@@ -130,6 +130,12 @@ export default function Home() {
 
         {/* Ссылка на сайт */}
         <footer className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-[var(--border)] pt-6 sm:mt-10">
+          <Link
+            href="/home-ui-preview"
+            className="text-sm text-[var(--muted)] underline decoration-[var(--border)] underline-offset-2 hover:text-[var(--foreground)] hover:decoration-[var(--accent)]"
+          >
+            Открыть UI-превью новой главной
+          </Link>
           <a
             href="https://pass-port.ru/"
             target="_blank"

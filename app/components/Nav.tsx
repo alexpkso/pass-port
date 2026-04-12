@@ -10,6 +10,7 @@ const links = [
   { href: '/services', label: 'Услуги' },
   { href: '/reports', label: 'Отчёты' },
   { href: '/costs', label: 'Затраты' },
+  { href: '/activity', label: 'Лог действий' },
   { href: '/about', label: 'О сервисе' },
 ]
 

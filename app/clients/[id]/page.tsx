@@ -15,6 +15,8 @@ type Client = {
   name: string
   legal_name: string | null
   manager_id: number | null
+  card_review_requested: boolean | null
+  card_review_written: boolean | null
   /** Связь: Supabase может вернуть объект (many-to-one) или массив в зависимости от конфига */
   employees: Employee | Employee[] | null
   created_at: string
@@ -125,7 +127,13 @@ export default function ClientCardPage() {
   const [editingPayment, setEditingPayment] = useState<Payment | null>(null)
   const [services, setServices] = useState<Service[]>([])
   const [employees, setEmployees] = useState<Employee[]>([])
-  const [clientEdit, setClientEdit] = useState({ name: '', legal_name: '', manager_id: '' })
+  const [clientEdit, setClientEdit] = useState({
+    name: '',
+    legal_name: '',
+    manager_id: '',
+    card_review_requested: false,
+    card_review_written: false,
+  })
   const [showClientEdit, setShowClientEdit] = useState(false)
   const [selectedServiceFilter, setSelectedServiceFilter] = useState<string>('')
   const chargeFormRef = useRef<HTMLFormElement>(null)
@@ -168,7 +176,7 @@ export default function ClientCardPage() {
     if (!id) return
     const { data, error: e } = await supabase
       .from('clients')
-      .select('id, name, legal_name, manager_id, created_at, employees(id, name)')
+      .select('id, name, legal_name, manager_id, card_review_requested, card_review_written, created_at, employees(id, name)')
       .eq('id', id)
       .single()
     if (e) {
@@ -217,6 +225,8 @@ export default function ClientCardPage() {
         name: client.name ?? '',
         legal_name: client.legal_name ?? '',
         manager_id: client.manager_id != null ? String(client.manager_id) : '',
+        card_review_requested: Boolean(client.card_review_requested),
+        card_review_written: Boolean(client.card_review_written),
       })
     }
   }, [client])
@@ -235,6 +245,8 @@ export default function ClientCardPage() {
         name: clientEdit.name.trim(),
         legal_name: clientEdit.legal_name.trim() || null,
         manager_id: clientEdit.manager_id ? Number(clientEdit.manager_id) : null,
+        card_review_requested: clientEdit.card_review_requested,
+        card_review_written: clientEdit.card_review_written,
       })
       .eq('id', id)
     if (e) setError(e.message)
@@ -786,6 +798,8 @@ export default function ClientCardPage() {
                 : null
             }
             createdAt={client.created_at}
+            cardReviewRequested={Boolean(client.card_review_requested)}
+            cardReviewWritten={Boolean(client.card_review_written)}
             charges={charges}
             payments={payments}
             onEditClick={() => setShowClientEdit(v => !v)}
@@ -827,7 +841,13 @@ export default function ClientCardPage() {
                     <button
                       type="button"
                       onClick={() => setConfirm({ open: true, type: 'client', id: 0 })}
-                      disabled={saving || (clientEdit.name === (client.name ?? '') && clientEdit.legal_name === (client.legal_name ?? '') && clientEdit.manager_id === (client.manager_id != null ? String(client.manager_id) : ''))}
+                      disabled={saving || (
+                        clientEdit.name === (client.name ?? '') &&
+                        clientEdit.legal_name === (client.legal_name ?? '') &&
+                        clientEdit.manager_id === (client.manager_id != null ? String(client.manager_id) : '') &&
+                        clientEdit.card_review_requested === Boolean(client.card_review_requested) &&
+                        clientEdit.card_review_written === Boolean(client.card_review_written)
+                      )}
                       className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-40"
                     >
                       Сохранить
@@ -839,6 +859,29 @@ export default function ClientCardPage() {
                     >
                       Отмена
                     </button>
+                  </div>
+                </div>
+                <div className="mt-4 border-t border-[var(--border)] pt-4">
+                  <p className="mb-2 text-sm font-medium text-[var(--foreground)]">Отзыв карты</p>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[var(--foreground)]">
+                      <input
+                        type="checkbox"
+                        checked={clientEdit.card_review_requested}
+                        onChange={e => setClientEdit(f => ({ ...f, card_review_requested: e.target.checked }))}
+                        className="h-4 w-4 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-600 dark:bg-zinc-800"
+                      />
+                      отправил запрос
+                    </label>
+                    <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[var(--foreground)]">
+                      <input
+                        type="checkbox"
+                        checked={clientEdit.card_review_written}
+                        onChange={e => setClientEdit(f => ({ ...f, card_review_written: e.target.checked }))}
+                        className="h-4 w-4 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-600 dark:bg-zinc-800"
+                      />
+                      написали отзыв
+                    </label>
                   </div>
                 </div>
               </section>

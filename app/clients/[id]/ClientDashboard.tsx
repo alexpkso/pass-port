@@ -29,6 +29,8 @@ type Props = {
   legalName: string | null
   managerName: string | null
   createdAt: string
+  cardReviewRequested: boolean
+  cardReviewWritten: boolean
   /** Все начисления клиента */
   charges: DashCharge[]
   /** Все платежи клиента, отсортированы по дате DESC (новейшие первыми) */
@@ -108,7 +110,18 @@ function BlockBar({ label, value, max, colorCls }: {
 
 // ─── Главный компонент ───────────────────────────────────────────────────────
 
-export default function ClientDashboard({ clientName, legalName, managerName, createdAt, charges, payments, onEditClick, editFormSlot }: Props) {
+export default function ClientDashboard({
+  clientName,
+  legalName,
+  managerName,
+  createdAt,
+  cardReviewRequested,
+  cardReviewWritten,
+  charges,
+  payments,
+  onEditClick,
+  editFormSlot,
+}: Props) {
   const [ratingHint, setRatingHint] = React.useState(false)
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -228,10 +241,21 @@ export default function ClientDashboard({ clientName, legalName, managerName, cr
               </span>
             </div>
             {legalName && <p className="mt-0.5 text-sm text-[var(--muted)] truncate">{legalName}</p>}
-            <div className="mt-1.5 flex flex-wrap gap-4 text-sm text-[var(--muted)]">
-              {managerName && <span>👤 {managerName}</span>}
-              <span>📅 С {fmt(createdAt)}</span>
-              <span>🕐 {tenureLabel}</span>
+            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--muted)]">
+              <div className="flex flex-wrap items-center gap-4">
+                {managerName && <span>👤 {managerName}</span>}
+                <span>📅 С {fmt(createdAt)}</span>
+                <span>🕐 {tenureLabel}</span>
+              </div>
+              <div className="flex items-center gap-2 whitespace-nowrap">
+                <span className="text-xs text-[var(--muted)]">Отзыв карты:</span>
+                <span className={`rounded-md border px-2 py-0.5 text-xs ${cardReviewRequested ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400'}`}>
+                  {cardReviewRequested ? '✓' : '□'} отправил запрос
+                </span>
+                <span className={`rounded-md border px-2 py-0.5 text-xs ${cardReviewWritten ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400'}`}>
+                  {cardReviewWritten ? '✓' : '□'} написали отзыв
+                </span>
+              </div>
             </div>
           </div>
           {onEditClick && (
